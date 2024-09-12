@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools", "wheel", "setuptools_scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cehrgpt"
+dynamic = ["version"]
+authors = [
+    { name = "Chao Pang", email = "chaopang229@gmail.com" },
+    { name = "Xinzhuo Jiang", email = "xj2193@cumc.columbia.edu" },
+    { name = "Krishna Kalluri", email = "kk3326@cumc.columbia.edu" },
+    { name = "Elise Minto", email = "em3697@cumc.columbia.edu" },
+    { name = "Jason Patterson", email = "jp3477@cumc.columbia.edu" },
+    { name = "Nishanth Parameshwar Pavinkurve", email = "np2689@cumc.columbia.edu" },
+    { name = "Karthik Natarajan", email = "kn2174@cumc.columbia.edu" }
+]
+description = "CEHR-GPT: Generating Electronic Health Records with Chronological Patient Timelines"
+readme = "README.md"
+license = { text = "MIT License" }
+requires-python = ">=3.10.0"
+
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3"
+]
+
+dependencies = [
+    "cehrbert==1.1.8",
+    "cehrbert_data==0.0.1"
+]
+
+[tool.setuptools_scm]
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit", "pytest", "pytest-cov", "pytest-subtests", "rootutils", "hypothesis", "black"
+]
