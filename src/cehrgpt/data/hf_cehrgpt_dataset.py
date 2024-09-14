@@ -3,15 +3,14 @@ from datasets import Dataset, DatasetDict
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrbert.data_generators.hf_data_generator.hf_dataset import FINETUNING_COLUMNS, apply_cehrbert_dataset_mapping
 from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import (
-    SortPatientSequenceMapping, HFFineTuningMapping, MedToCehrBertDatasetMapping
+    SortPatientSequenceMapping, HFFineTuningMapping
 )
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import HFCehrGptTokenizationMapping
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 
 CEHRGPT_COLUMNS = [
     'person_id', 'concept_ids', 'concept_values', 'concept_value_masks',
-    'mlm_skip_values', 'num_of_concepts', 'num_of_visits',
-    'orders', 'dates', 'record_ranks'
+    'num_of_concepts', 'num_of_visits'
 ]
 
 TRANSFORMER_COLUMNS = ['input_ids']
