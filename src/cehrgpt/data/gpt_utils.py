@@ -80,7 +80,7 @@ def random_slice_gpt_sequence(
 
 
 def is_att_token(token: str):
-    if token.startswith("D"):
+    if bool(re.match(r'^D\d+', token)):
         return True
     elif token == "LT":
         return True
