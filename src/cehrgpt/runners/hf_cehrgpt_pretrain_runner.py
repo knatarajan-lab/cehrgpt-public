@@ -2,7 +2,7 @@ import os
 
 from typing import Union, Optional
 
-from datasets import load_from_disk, load_dataset, DatasetDict, Dataset
+from datasets import load_from_disk, DatasetDict, Dataset, IterableDatasetDict
 from transformers.utils import logging
 from transformers import AutoConfig, Trainer, set_seed
 
@@ -89,7 +89,7 @@ def main():
         training_args.dataloader_prefetch_factor = 0
 
     prepared_ds_path = generate_prepared_ds_path(data_args, model_args)
-
+    cehrgpt_tokenizer = None
     if os.path.exists(os.path.join(data_args.data_folder, 'dataset_dict.json')):
         LOG.info(f"Loading prepared dataset from disk at {data_args.data_folder}...")
         processed_dataset = load_from_disk(data_args.data_folder)
@@ -116,12 +116,26 @@ def main():
         if data_args.is_data_in_med:
             meds_extension_path = get_meds_extension_path(
                 data_folder=data_args.data_folder,
-                dataset_prepared_path=data_args.dataset_prepared_path
+                dataset_prepared_path=data_args.dataset_prepared_path,
             )
             try:
-                LOG.info(f"Trying to load the MEDS extension from disk at {meds_extension_path}...")
-                dataset = load_dataset(meds_extension_path, streaming=data_args.streaming)
-            except Exception as e:
+                LOG.info(
+                    "Trying to load the MEDS extension from disk at %s...",
+                    meds_extension_path,
+                )
+                dataset = load_from_disk(meds_extension_path)
+                if data_args.streaming:
+                    if isinstance(dataset, DatasetDict):
+                        dataset = {
+                            k: v.to_iterable_dataset(
+                                num_shards=training_args.dataloader_num_workers
+                            ) for k, v in dataset.items()
+                        }
+                    else:
+                        dataset = dataset.to_iterable_dataset(
+                            num_shards=training_args.dataloader_num_workers
+                        )
+            except FileNotFoundError as e:
                 LOG.exception(e)
                 dataset = create_dataset_from_meds_reader(data_args, is_pretraining=True)
                 if not data_args.streaming:
@@ -158,7 +172,7 @@ def main():
                 )
 
         # Create the CEHR-GPT tokenizer if it's not available in the output folder
-        tokenizer = load_and_create_tokenizer(
+        cehrgpt_tokenizer = load_and_create_tokenizer(
             data_args=data_args,
             model_args=model_args,
             dataset=dataset
@@ -166,7 +180,7 @@ def main():
         # sort the patient features chronologically and tokenize the data
         processed_dataset = create_cehrgpt_pretraining_dataset(
             dataset=dataset,
-            cehrgpt_tokenizer=tokenizer,
+            cehrgpt_tokenizer=cehrgpt_tokenizer,
             data_args=data_args
         )
         # only save the data to the disk if it is not streaming
@@ -187,7 +201,7 @@ def main():
 
     # The filter can't be applied to a DatasetDict of IterableDataset (in case of streaming)
     # we need to iterate through all the datasets and apply the filter separately
-    if isinstance(processed_dataset, DatasetDict):
+    if isinstance(processed_dataset, DatasetDict) or isinstance(processed_dataset, IterableDatasetDict):
         for key in processed_dataset.keys():
             processed_dataset[key] = processed_dataset[key].filter(filter_func, **filter_args)
     else:
@@ -196,7 +210,7 @@ def main():
             **filter_args
         )
 
-    model = load_and_create_model(model_args, tokenizer)
+    model = load_and_create_model(model_args, cehrgpt_tokenizer)
 
     # Detecting last checkpoint.
     last_checkpoint = get_last_hf_checkpoint(training_args)
@@ -218,7 +232,7 @@ def main():
     trainer = Trainer(
         model=model,
         data_collator=CehrGptDataCollator(
-            tokenizer=tokenizer,
+            tokenizer=cehrgpt_tokenizer,
             max_length=model_args.max_position_embeddings,
             shuffle_records=data_args.shuffle_records,
             include_values=model_args.include_values,
@@ -227,8 +241,7 @@ def main():
         ),
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        args=training_args,
-        # compute_metrics=compute_metrics
+        args=training_args
     )
 
     checkpoint = None

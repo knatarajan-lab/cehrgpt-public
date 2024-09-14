@@ -2,6 +2,7 @@ import os
 import json
 import pickle
 import collections
+from tqdm import tqdm
 from functools import partial
 from typing import Sequence, Union, List, Dict, Any
 from itertools import islice
@@ -50,10 +51,14 @@ class CehrGptTokenizer(PushToHubMixin):
         self._lab_stats = lab_stats
         self._lab_stat_mapping = {
             lab_stat["concept_id"]: {
-                'unit': lab_stat["unit"],
-                'mean': lab_stat['mean'],
-                'std': lab_stat['std']
-            } for lab_stat in lab_stats
+                "unit": lab_stat["unit"],
+                "mean": lab_stat["mean"],
+                "std": lab_stat["std"],
+                "value_outlier_std": lab_stat["value_outlier_std"],
+                "lower_bound": lab_stat["lower_bound"],
+                "upper_bound": lab_stat["upper_bound"],
+            }
+            for lab_stat in lab_stats
         }
         self._concept_name_mapping = concept_name_mapping
         self._oov_token_id = self._tokenizer.token_to_id(OUT_OF_VOCABULARY_TOKEN)
@@ -305,9 +310,15 @@ class CehrGptTokenizer(PushToHubMixin):
 
             concept_tokenizer.train_from_iterator(generator, trainer=concept_trainer)
 
+            map_statistics_partial = partial(
+                map_statistics,
+                capacity=data_args.offline_stats_capacity,
+                value_outlier_std=data_args.value_outlier_std,
+            )
+
             if data_args.streaming:
                 parts = dataset.map(
-                    partial(agg_helper, map_func=map_statistics),
+                    partial(agg_helper, map_func=map_statistics_partial),
                     batched=True,
                     batch_size=data_args.preprocessing_batch_size,
                     keep_in_memory=True,
@@ -316,7 +327,7 @@ class CehrGptTokenizer(PushToHubMixin):
                 )
             else:
                 parts = dataset.map(
-                    partial(agg_helper, map_func=map_statistics),
+                    partial(agg_helper, map_func=map_statistics_partial),
                     batched=True,
                     batch_size=data_args.preprocessing_batch_size,
                     remove_columns=dataset.column_names,
@@ -325,21 +336,25 @@ class CehrGptTokenizer(PushToHubMixin):
                     new_fingerprint="invalid",
                 )
             current = None
-            for stat in parts:
+            for stat in tqdm(parts, desc="Aggregating the lab statistics"):
                 fixed_stat = pickle.loads(stat["data"])
                 if current is None:
                     current = fixed_stat
                 else:
                     current = agg_statistics(current, fixed_stat)
+
             lab_stats = [
                 {
-                    'concept_id': concept_id,
-                    'unit': unit,
-                    'mean': online_stats.mean(),
-                    'std': online_stats.standard_deviation(),
-                    'count': online_stats.count
+                    "concept_id": concept_id,
+                    "unit": unit,
+                    "mean": online_stats.mean(),
+                    "std": online_stats.standard_deviation(),
+                    "count": online_stats.count,
+                    "value_outlier_std": data_args.value_outlier_std,
+                    "lower_bound": online_stats.mean() - data_args.value_outlier_std * online_stats.standard_deviation(),
+                    "upper_bound": online_stats.mean() + data_args.value_outlier_std * online_stats.standard_deviation(),
                 }
-                for (concept_id, unit), online_stats in current['numeric_stats_by_lab'].items()
+                for (concept_id, unit), online_stats in current["numeric_stats_by_lab"].items()
             ]
 
         # We will train a tokenizer specifically for time intervals
@@ -372,12 +387,17 @@ class CehrGptTokenizer(PushToHubMixin):
 
     def normalize(self, concept_id, concept_value) -> float:
         if concept_id in self._lab_stat_mapping:
-            mean_ = (concept_value - self._lab_stat_mapping[concept_id]['mean'])
-            std = self._lab_stat_mapping[concept_id]['std']
+            mean_ = concept_value - self._lab_stat_mapping[concept_id]["mean"]
+            std = self._lab_stat_mapping[concept_id]["std"]
             if std > 0:
-                normalized_value = mean_ / self._lab_stat_mapping[concept_id]['std']
+                value_outlier_std = self._lab_stat_mapping[concept_id]["value_outlier_std"]
+                normalized_value = mean_ / self._lab_stat_mapping[concept_id]["std"]
+                # Clip the value between the lower and upper bounds of the corresponding lab
+                normalized_value = max(-value_outlier_std, min(value_outlier_std, normalized_value))
             else:
-                normalized_value = mean_
+                # If there is not a valid standard deviation,
+                # we just the normalized value to the mean of the standard normal
+                normalized_value = 0.0
             return normalized_value
         return concept_value
 
