@@ -256,7 +256,6 @@ def main():
             data_collator=collator,
             train_dataset=processed_dataset['train'],
             eval_dataset=processed_dataset['validation'],
-            compute_metrics=compute_metrics,
             callbacks=[EarlyStoppingCallback()],
             args=training_args
         )
