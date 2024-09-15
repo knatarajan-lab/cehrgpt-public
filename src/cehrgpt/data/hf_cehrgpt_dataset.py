@@ -10,7 +10,7 @@ from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 
 CEHRGPT_COLUMNS = [
     'person_id', 'concept_ids', 'concept_values', 'concept_value_masks',
-    'num_of_concepts', 'num_of_visits'
+    'num_of_concepts', 'num_of_visits', 'values', 'value_indicators'
 ]
 
 TRANSFORMER_COLUMNS = ['input_ids']

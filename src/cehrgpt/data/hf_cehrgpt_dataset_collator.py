@@ -248,11 +248,11 @@ class CehrGptDataCollator:
             )
             if self.include_values:
                 record['value_indicators'] = torch.concat(
-                    [self._convert_to_tensor(record['concept_value_masks']),
+                    [self._convert_to_tensor(record['value_indicators']),
                      self._convert_to_tensor([0])]
                 ).to(torch.bool)
                 record['values'] = torch.concat(
-                    [self._convert_to_tensor(record['concept_values']),
+                    [self._convert_to_tensor(record['values']),
                      self._convert_to_tensor([-1.0])]
                 )
             if self.include_ttv_prediction:
@@ -275,10 +275,10 @@ class CehrGptDataCollator:
                     record['input_ids'] = self._convert_to_tensor(record['input_ids'][start_index:end_index + 1])
                     if self.include_values:
                         record['value_indicators'] = self._convert_to_tensor(
-                            record['concept_value_masks'][start_index:end_index + 1]
+                            record['value_indicators'][start_index:end_index + 1]
                         ).to(torch.bool)
                         record['values'] = self._convert_to_tensor(
-                            record['concept_values'][start_index:end_index + 1]
+                            record['values'][start_index:end_index + 1]
                         )
                     if self.include_ttv_prediction:
                         record['time_to_visits'] = self._convert_to_tensor(
@@ -297,10 +297,10 @@ class CehrGptDataCollator:
             record['input_ids'] = record['input_ids'][0:end_index]
             if self.include_values:
                 record['value_indicators'] = self._convert_to_tensor(
-                    record['concept_value_masks'][0:end_index]
+                    record['value_indicators'][0:end_index]
                 ).to(torch.bool)
                 record['values'] = self._convert_to_tensor(
-                    record['concept_values'][0:end_index]
+                    record['values'][0:end_index]
                 )
             if self.include_ttv_prediction:
                 record['time_to_visits'] = self._convert_to_tensor(
@@ -320,10 +320,10 @@ class CehrGptDataCollator:
             record['input_ids'] = record['input_ids'][start_index:end_index]
             if self.include_values:
                 record['value_indicators'] = self._convert_to_tensor(
-                    record['concept_value_masks'][start_index:end_index]
+                    record['value_indicators'][start_index:end_index]
                 ).to(torch.bool)
                 record['values'] = self._convert_to_tensor(
-                    record['concept_values'][start_index:end_index]
+                    record['values'][start_index:end_index]
                 )
             if self.include_ttv_prediction:
                 record['time_to_visits'] = self._convert_to_tensor(
