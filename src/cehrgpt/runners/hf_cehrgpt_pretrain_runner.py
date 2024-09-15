@@ -78,7 +78,6 @@ def load_and_create_model(
 
 def main():
     data_args, model_args, training_args = parse_runner_args()
-    training_args.remove_unused_columns = False
 
     if data_args.streaming:
         # This is for disabling the warning message https://github.com/huggingface/transformers/issues/5486
