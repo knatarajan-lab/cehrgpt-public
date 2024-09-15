@@ -1,4 +1,5 @@
 import os
+from tokenize import tokenize
 
 from typing import Union, Optional
 
@@ -89,7 +90,6 @@ def main():
         training_args.dataloader_prefetch_factor = 0
 
     prepared_ds_path = generate_prepared_ds_path(data_args, model_args)
-    cehrgpt_tokenizer = None
     if os.path.exists(os.path.join(data_args.data_folder, 'dataset_dict.json')):
         LOG.info(f"Loading prepared dataset from disk at {data_args.data_folder}...")
         processed_dataset = load_from_disk(data_args.data_folder)
@@ -100,6 +100,7 @@ def main():
                 f"The dataset has been tokenized but the corresponding tokenizer: "
                 f"{model_args.tokenizer_name_or_path} does not exist"
             )
+        cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(model_args.tokenizer_name_or_path)
     elif any(prepared_ds_path.glob("*")):
         LOG.info(f"Loading prepared dataset from disk at {prepared_ds_path}...")
         processed_dataset = load_from_disk(str(prepared_ds_path))
@@ -111,6 +112,7 @@ def main():
                 f"The dataset has been tokenized but the corresponding tokenizer: "
                 f"{model_args.tokenizer_name_or_path} does not exist"
             )
+        cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(model_args.tokenizer_name_or_path)
     else:
         # If the data is in the MEDS format, we need to convert it to the CEHR-BERT format
         if data_args.is_data_in_med:
