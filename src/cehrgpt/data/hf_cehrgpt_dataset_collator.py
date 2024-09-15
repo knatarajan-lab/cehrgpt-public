@@ -299,7 +299,7 @@ class CehrGptDataCollator:
         else:
             # We employ a left truncation strategy, where the most recent patient history is reserved for fine-tuning
             start_index = seq_length - new_max_length
-            end_index = new_max_length
+            end_index = seq_length
             for i in range(start_index, end_index):
                 current_token = record['input_ids'][i]
                 if current_token == self.vs_token_id:
