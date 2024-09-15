@@ -175,6 +175,18 @@ class CehrGptDataCollator:
             batch['true_value_indicators'] = batch['value_indicators'].clone()
             batch['true_values'] = batch['values'].clone()
 
+        if "person_id" in examples[0]:
+            batch["person_id"] = torch.cat(
+                [self._convert_to_tensor(example["person_id"]).reshape(-1, 1) for example in examples],
+                dim=0,
+            ).to(torch.float)
+
+        if "index_date" in examples[0]:
+            batch["index_date"] = torch.cat(
+                [self._convert_to_tensor(example["index_date"]).reshape(-1, 1) for example in examples],
+                dim=0,
+            ).to(torch.float32)
+
         if 'age_at_index' in examples[0]:
             batch['age_at_index'] = torch.cat(
                 [self._convert_to_tensor(example['age_at_index']).reshape(-1, 1) for example in examples],
