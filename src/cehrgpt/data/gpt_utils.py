@@ -80,7 +80,13 @@ def random_slice_gpt_sequence(
 
 
 def is_att_token(token: str):
-    if bool(re.match(r'^D\d+', token)):
+    if bool(re.match(r'^D\d+', token)):  # day tokens
+        return True
+    elif bool(re.match(r'^W\d+', token)):  # week tokens
+        return True
+    elif bool(re.match(r'^M\d+', token)):  # month tokens
+        return True
+    elif bool(re.match(r'^Y\d+', token)):  # year tokens
         return True
     elif token == "LT":
         return True
@@ -101,8 +107,14 @@ def is_inpatient_att_token(token: str):
 
 def extract_time_interval_in_days(token: str):
     try:
-        if token[0] == 'D':
+        if token[0] == 'D':  # day tokens
             return int(token[1:])
+        elif token[0] == 'W':  # week tokens
+            return int(token[1:]) * 7
+        elif token[0] == 'M':  # month tokens
+            return int(token[1:]) * 30
+        elif token[0] == 'Y':  # year tokens
+            return int(token[1:]) * 365
         elif token == 'LT':
             return 365 * 3
         elif token[:3] == 'VS-':  # VS-D7-VE
