@@ -237,6 +237,8 @@ class CehrGptDataCollator:
         """
         Adding the start and end indices to extract a portion of the patient sequence
         """
+        # concept_ids will be used to for time to event predictions and identifying the visit starts
+        concept_ids = [self.tokenizer.decode(_) for _ in record['input_ids']]
         seq_length = len(record['input_ids'])
         new_max_length = self.max_length - 1  # Subtract one for the [END] token
 
@@ -257,7 +259,7 @@ class CehrGptDataCollator:
                 )
             if self.include_ttv_prediction:
                 record['time_to_visits'] = torch.concat(
-                    [self._convert_to_tensor(self._convert_time_to_event(record['concept_ids'])),
+                    [self._convert_to_tensor(self._convert_time_to_event(concept_ids)),
                      self._convert_to_tensor([-100.0])]
                 )
 
@@ -268,7 +270,7 @@ class CehrGptDataCollator:
             # prompt depending on the new starting point
             if random.random() < 0.5:
                 start_index, end_index, demographic_tokens = random_slice_gpt_sequence(
-                    record['concept_ids'],
+                    concept_ids,
                     new_max_length
                 )
                 if start_index != end_index:
@@ -282,7 +284,7 @@ class CehrGptDataCollator:
                         )
                     if self.include_ttv_prediction:
                         record['time_to_visits'] = self._convert_to_tensor(
-                            self._convert_time_to_event(record['concept_ids'][start_index:end_index + 1])
+                            self._convert_time_to_event(concept_ids[start_index:end_index + 1])
                         )
                     return record
 
@@ -304,7 +306,7 @@ class CehrGptDataCollator:
                 )
             if self.include_ttv_prediction:
                 record['time_to_visits'] = self._convert_to_tensor(
-                    self._convert_time_to_event(record['concept_ids'][0:end_index])
+                    self._convert_time_to_event(concept_ids[0:end_index])
                 )
             return record
 
@@ -327,6 +329,6 @@ class CehrGptDataCollator:
                 )
             if self.include_ttv_prediction:
                 record['time_to_visits'] = self._convert_to_tensor(
-                    self._convert_time_to_event(record['concept_ids'][start_index:end_index])
+                    self._convert_time_to_event(concept_ids[start_index:end_index])
                 )
             return record

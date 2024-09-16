@@ -43,18 +43,11 @@ def random_slice_gpt_sequence(
         birth_date = date(start_year - start_age, 1, 1)
         for i in range(4, max(5, seq_length - max_seq_len)):
             current_token = concept_ids[i]
-            if current_token == 'VS':
+            if is_visit_start(current_token):
                 starting_points.append((i, data_cursor.year, data_cursor.year - birth_date.year))
-            elif current_token[0] == 'D':
-                att_date_delta = int(current_token[1:])
+            elif is_att_token(current_token):
+                att_date_delta = extract_time_interval_in_days(current_token)
                 data_cursor = data_cursor + timedelta(days=att_date_delta)
-            elif current_token == 'LT':
-                att_date_delta = 365 * 3
-                data_cursor = data_cursor + timedelta(days=att_date_delta)
-            elif current_token[:3] == 'VS-':  # VS-D7-VE
-                data_cursor = data_cursor + timedelta(days=int(current_token.split('-')[1][1:]))
-            elif current_token[:2] == 'i-':  # i-D7
-                data_cursor = data_cursor + timedelta(days=int(current_token.split('-')[1][1:]))
 
         if len(starting_points) == 0:
             return 0, 0, concept_ids[0:4]
@@ -75,8 +68,13 @@ def random_slice_gpt_sequence(
                 break
         # new_token_ids = demographic_tokens + concept_ids[random_starting_index:random_end_index + 1]
         return random_starting_index, random_end_index, demographic_tokens
+
     except Exception as e:
         return 0, max_seq_len - 1, []
+
+
+def is_visit_start(token: str):
+    return token in ['VS', '[VS]']
 
 
 def is_att_token(token: str):
