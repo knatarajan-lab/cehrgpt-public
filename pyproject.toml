@@ -38,3 +38,6 @@ dependencies = [
 dev = [
     "pre-commit", "pytest", "pytest-cov", "pytest-subtests", "rootutils", "hypothesis", "black"
 ]
+flash_attn = [
+    "flash_attn"
+]

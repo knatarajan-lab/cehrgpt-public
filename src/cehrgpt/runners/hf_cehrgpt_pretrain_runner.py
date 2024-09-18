@@ -1,10 +1,8 @@
 import os
-from tokenize import tokenize
-
 from typing import Union, Optional
 
 from datasets import load_from_disk, DatasetDict, Dataset, IterableDatasetDict
-from transformers.utils import logging
+from transformers.utils import logging, is_flash_attn_2_available
 from transformers import AutoConfig, Trainer, set_seed
 
 from cehrbert.data_generators.hf_data_generator.meds_utils import create_dataset_from_meds_reader
@@ -59,9 +57,10 @@ def load_and_create_model(
         model_args: ModelArguments,
         tokenizer: CehrGptTokenizer
 ) -> CEHRGPT2LMHeadModel:
+    attn_implementation = "flash_attention_2" if is_flash_attn_2_available() else "eager"
     try:
         model_abspath = os.path.abspath(model_args.model_name_or_path)
-        model_config = AutoConfig.from_pretrained(model_abspath)
+        model_config = AutoConfig.from_pretrained(model_abspath, attn_implementation=attn_implementation)
     except Exception as e:
         LOG.warning(e)
         model_config = CEHRGPTConfig(
@@ -71,6 +70,7 @@ def load_and_create_model(
             eos_token_id=tokenizer.end_token_id,
             lab_token_ids=tokenizer.lab_token_ids,
             token_to_time_token_mapping=tokenizer.token_to_time_token_mapping,
+            attn_implementation=attn_implementation,
             **model_args.as_dict()
         )
     return CEHRGPT2LMHeadModel(model_config)

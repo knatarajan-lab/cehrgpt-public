@@ -10,7 +10,7 @@ from scipy.special import expit as sigmoid
 import torch
 from torch.utils.data import DataLoader
 from datasets import load_from_disk, DatasetDict
-from transformers.utils import logging
+from transformers.utils import logging, is_flash_attn_2_available
 from transformers import TrainingArguments, Trainer, set_seed, EarlyStoppingCallback
 from peft import LoraConfig, get_peft_model, PeftModel
 
@@ -47,9 +47,11 @@ def load_finetuned_model(model_args: ModelArguments, model_name_or_path: str) ->
         raise ValueError(
             f"finetune_model_type can be one of the following types {FineTuneModelType.POOLING.value}"
         )
+
+    attn_implementation = "flash_attention_2" if is_flash_attn_2_available() else "eager"
     # Try to create a new model based on the base model
     try:
-        return finetune_model_cls.from_pretrained(model_name_or_path)
+        return finetune_model_cls.from_pretrained(model_name_or_path, attn_implementation=attn_implementation)
     except ValueError:
         raise ValueError(f"Can not load the finetuned model from {model_name_or_path}")
 
@@ -211,16 +213,6 @@ def main():
         )
         if not data_args.streaming:
             processed_dataset.save_to_disk(prepared_ds_path)
-
-    # We suppress the additional learning objectives in fine-tuning
-    collator = CehrGptDataCollator(
-        tokenizer=tokenizer,
-        max_length=model_args.max_position_embeddings,
-        pretraining=False,
-        include_ttv_prediction=False,
-        use_sub_time_tokenization=False
-    )
-
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
@@ -250,6 +242,15 @@ def main():
                 model = get_peft_model(model, config)
             else:
                 raise ValueError(f'The LORA adapter is not supported for {model_args.finetune_model_type}')
+
+        # We suppress the additional learning objectives in fine-tuning
+        collator = CehrGptDataCollator(
+            tokenizer=tokenizer,
+            max_length=model.config.max_position_embeddings,
+            pretraining=False,
+            include_ttv_prediction=False,
+            use_sub_time_tokenization=False
+        )
 
         trainer = Trainer(
             model=model,
