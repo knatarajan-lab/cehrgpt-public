@@ -5,7 +5,7 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
-from cehrgpt.data.gpt_utils import (
+from cehrgpt.gpt_utils import (
     random_slice_gpt_sequence, is_inpatient_att_token, is_att_token, extract_time_interval_in_days
 )
 

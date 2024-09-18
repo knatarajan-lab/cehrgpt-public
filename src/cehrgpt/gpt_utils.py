@@ -139,3 +139,15 @@ def convert_time_interval_to_time_tuple(time_interval: int, is_inpatient: bool) 
     month_token = f"month:{month}"
     day_token = f"i-day:{day}" if is_inpatient else f"day:{day}"
     return year_token, month_token, day_token
+
+
+def generate_artificial_time_tokens():
+    """
+    Generate all the time tokens used in training
+    :return:
+    """
+    day_tokens = [f'D{i}' for i in range(2000)]
+    week_tokens = [f'W{i}' for i in range(4)]
+    month_tokens = [f'M{i}' for i in range(12)]
+    long_term_tokens = ['LT']
+    return day_tokens + week_tokens + month_tokens + long_term_tokens

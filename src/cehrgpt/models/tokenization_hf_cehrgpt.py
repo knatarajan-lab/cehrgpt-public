@@ -19,7 +19,7 @@ from cehrbert.models.hf_models.tokenization_utils import (
     load_json_file, agg_helper, map_statistics, agg_statistics
 )
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
-from cehrgpt.data.gpt_utils import (
+from cehrgpt.gpt_utils import (
     is_att_token, extract_time_interval_in_days, convert_time_interval_to_time_tuple, is_inpatient_att_token
 )
 
