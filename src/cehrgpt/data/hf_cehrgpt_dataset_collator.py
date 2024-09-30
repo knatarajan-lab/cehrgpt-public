@@ -190,7 +190,7 @@ class CehrGptDataCollator:
                     for example in examples
                 ],
                 dim=0,
-            ).to(torch.float)
+            ).to(torch.int32)
 
         if "index_date" in examples[0]:
             batch["index_date"] = torch.cat(
@@ -208,7 +208,7 @@ class CehrGptDataCollator:
                     for example in examples
                 ],
                 dim=0,
-            ).to(torch.float)
+            ).to(torch.float32)
 
         if "classifier_label" in examples[0]:
             batch["classifier_label"] = torch.cat(
@@ -217,7 +217,7 @@ class CehrGptDataCollator:
                     for example in examples
                 ],
                 dim=0,
-            ).to(torch.float)
+            ).to(torch.float32)
 
         return batch
 
@@ -262,7 +262,7 @@ class CehrGptDataCollator:
         input_ids = record["input_ids"]
         if isinstance(input_ids, torch.Tensor):
             input_ids = input_ids.detach().tolist()
-        concept_ids = self.tokenizer.decode(input_ids)
+        concept_ids = self.tokenizer.decode(input_ids, skip_special_tokens=False)
         seq_length = len(record["input_ids"])
         new_max_length = self.max_length - 1  # Subtract one for the [END] token
 
