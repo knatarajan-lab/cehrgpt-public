@@ -19,22 +19,26 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
         return ["concept_value_masks", "concept_values"]
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        input_ids = self._concept_tokenizer.encode(record["concept_ids"])
+        concept_ids = record["concept_ids"]
+        input_ids = self._concept_tokenizer.encode(concept_ids)
         record["input_ids"] = input_ids
+        units = record["units"]
         concept_value_masks = record["concept_value_masks"]
         concept_values = record["concept_values"]
 
         # If any concept has a value associated with it, we normalize the value
-        if np.any(concept_value_masks > 0):
+        if np.any(np.asarray(concept_value_masks) > 0):
             normalized_concept_values = copy.deepcopy(concept_values)
             for i, (
                 concept_id,
+                unit,
                 token_id,
                 concept_value_mask,
                 concept_value,
             ) in enumerate(
                 zip(
-                    record["concept_ids"],
+                    concept_ids,
+                    units,
                     input_ids,
                     concept_value_masks,
                     concept_values,
@@ -42,7 +46,7 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
             ):
                 if token_id in self._lab_token_ids:
                     normalized_concept_value = self._concept_tokenizer.normalize(
-                        concept_id, concept_value
+                        concept_id, unit, concept_value
                     )
                     normalized_concept_values[i] = normalized_concept_value
             record["concept_values"] = normalized_concept_values
