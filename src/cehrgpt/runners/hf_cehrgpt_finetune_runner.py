@@ -30,7 +30,11 @@ from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
 from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
-from cehrgpt.models.hf_cehrgpt import CehrGptForClassification, CEHRGPTPreTrainedModel
+from cehrgpt.models.hf_cehrgpt import (
+    CEHRGPTConfig,
+    CehrGptForClassification,
+    CEHRGPTPreTrainedModel,
+)
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 LOG = logging.get_logger("transformers")
@@ -248,10 +252,21 @@ def main():
         )
         if not data_args.streaming:
             processed_dataset.save_to_disk(prepared_ds_path)
+
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
     processed_dataset.set_format("pt")
+
+    config = CEHRGPTConfig.from_pretrained(model_args.model_name_or_path)
+    # We suppress the additional learning objectives in fine-tuning
+    collator = CehrGptDataCollator(
+        tokenizer=tokenizer,
+        max_length=config.max_position_embeddings,
+        pretraining=False,
+        include_ttv_prediction=False,
+        use_sub_time_tokenization=False,
+    )
 
     if training_args.do_train:
         model = load_finetuned_model(model_args, model_args.model_name_or_path)
@@ -280,15 +295,6 @@ def main():
                     f"The LORA adapter is not supported for {model_args.finetune_model_type}"
                 )
 
-        # We suppress the additional learning objectives in fine-tuning
-        collator = CehrGptDataCollator(
-            tokenizer=tokenizer,
-            max_length=model.config.max_position_embeddings,
-            pretraining=False,
-            include_ttv_prediction=False,
-            use_sub_time_tokenization=False,
-        )
-
         trainer = Trainer(
             model=model,
             data_collator=collator,
@@ -299,24 +305,23 @@ def main():
         )
 
         checkpoint = get_last_hf_checkpoint(training_args)
-        if training_args.do_train:
-            train_result = trainer.train(resume_from_checkpoint=checkpoint)
-            trainer.save_model()  # Saves the tokenizer too for easy upload
-            metrics = train_result.metrics
+        train_result = trainer.train(resume_from_checkpoint=checkpoint)
+        trainer.save_model()  # Saves the tokenizer too for easy upload
+        metrics = train_result.metrics
 
-            trainer.log_metrics("train", metrics)
-            trainer.save_metrics("train", metrics)
-            trainer.save_state()
+        trainer.log_metrics("train", metrics)
+        trainer.save_metrics("train", metrics)
+        trainer.save_state()
 
-        if training_args.do_predict:
-            test_dataloader = DataLoader(
-                dataset=processed_dataset["test"],
-                batch_size=training_args.per_device_eval_batch_size,
-                num_workers=training_args.dataloader_num_workers,
-                collate_fn=collator,
-                pin_memory=training_args.dataloader_pin_memory,
-            )
-            do_predict(test_dataloader, model_args, training_args)
+    if training_args.do_predict:
+        test_dataloader = DataLoader(
+            dataset=processed_dataset["test"],
+            batch_size=training_args.per_device_eval_batch_size,
+            num_workers=training_args.dataloader_num_workers,
+            collate_fn=collator,
+            pin_memory=training_args.dataloader_pin_memory,
+        )
+        do_predict(test_dataloader, model_args, training_args)
 
 
 def do_predict(
