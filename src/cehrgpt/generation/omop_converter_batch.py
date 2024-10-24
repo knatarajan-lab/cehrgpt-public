@@ -18,6 +18,8 @@ from ..gpt_utils import (
     extract_time_interval_in_days,
     generate_artificial_time_tokens,
     is_inpatient_att_token,
+    is_visit_end,
+    is_visit_start,
 )
 from .omop_entity import (
     ConditionOccurrence,
@@ -216,9 +218,9 @@ def gpt_to_omop_converter_serial(
                 row = row[0:]
         tokens_generated = row[START_TOKEN_SIZE:]
         concept_values = (
-            full_concept_values[START_TOKEN_SIZE:]
-            if full_concept_values is not None and ~np.isnan(full_concept_values)
-            else None
+            None
+            if np.any(pd.isnull(full_concept_values))
+            else full_concept_values[START_TOKEN_SIZE:]
         )
 
         # Skip the sequences whose sequence length is 0
@@ -263,7 +265,7 @@ def gpt_to_omop_converter_serial(
             # For bad sequences, we don't proceed further and break from the for loop
             if bad_sequence:
                 break
-            if x == "VS":
+            if is_visit_start(x):
                 if idx == len(tokens_generated) - 1:
                     break
                 elif tokens_generated[idx + 1] == "[DEATH]":
@@ -322,7 +324,7 @@ def gpt_to_omop_converter_serial(
                 # VS\-D\d+\-VE\
                 inpatient_time_span_in_days = extract_time_interval_in_days(x)
                 data_cursor = data_cursor + timedelta(days=inpatient_time_span_in_days)
-            elif x == "VE":
+            elif is_visit_end(x):
                 if vo is None:
                     bad_sequence = True
                     break
