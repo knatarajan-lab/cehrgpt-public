@@ -1,9 +1,16 @@
 import random
 import re
 from datetime import date, timedelta
-from typing import Sequence, Tuple
+from typing import List, Sequence, Tuple
 
-inpatient_att_pattern = re.compile(r"(?:VS-|i-)D(\d+)(?:-VE)?")
+from cehrgpt.cehrgpt_args import SamplingStrategy
+from cehrgpt.models.special_tokens import (
+    DISCHARGE_CONCEPT_IDS,
+    END_TOKEN,
+    VISIT_CONCEPT_IDS,
+)
+
+INPATIENT_ATT_PATTERN = re.compile(r"(?:VS-|i-)D(\d+)(?:-VE)?")
 
 
 class RandomSampleCache:
@@ -36,6 +43,34 @@ class RandomSampleCache:
                     random.choices(self._data_indices, k=self._cache_size)
                 )
         return self._cache.pop()
+
+
+def collect_demographic_prompts_at_visits(
+    demographic_prompt: List[str], patient_history: List[str]
+):
+    demographic_prompts_at_visits = []
+    start_year, start_age, start_gender, start_race = demographic_prompt
+    start_year = int(start_year.split(":")[1])
+    start_age = int(start_age.split(":")[1])
+    data_cursor = date(int(start_year), 1, 1)
+    birth_date = date(start_year - start_age, 1, 1)
+    for i, current_token in enumerate(patient_history):
+        if is_visit_start(current_token):
+            demographic_prompts_at_visits.append(
+                (
+                    i,
+                    (
+                        data_cursor.year,
+                        data_cursor.year - birth_date.year,
+                        start_gender,
+                        start_race,
+                    ),
+                )
+            )
+        elif is_att_token(current_token):
+            att_date_delta = extract_time_interval_in_days(current_token)
+            data_cursor = data_cursor + timedelta(days=att_date_delta)
+    return demographic_prompts_at_visits
 
 
 def random_slice_gpt_sequence(concept_ids, max_seq_len):
@@ -85,11 +120,45 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
         return 0, max_seq_len - 1, []
 
 
-def is_visit_start(token: str):
+def get_cehrgpt_output_folder(args, cehrgpt_tokenizer) -> str:
+    if args.sampling_strategy == SamplingStrategy.TopKStrategy.value:
+        folder_name = f"top_k{args.top_k}"
+        args.top_p = 1.0
+    elif args.sampling_strategy == SamplingStrategy.TopPStrategy.value:
+        folder_name = f"top_p{int(args.top_p * 1000)}"
+        args.top_k = cehrgpt_tokenizer.vocab_size
+    elif args.sampling_strategy == SamplingStrategy.TopMixStrategy.value:
+        folder_name = f"top_mix_p{int(args.top_p * 1000)}_k{args.top_k}"
+    else:
+        raise RuntimeError(
+            "sampling_strategy has to be one of the following three options [TopKStrategy, TopPStrategy, TopMixStrategy]"
+        )
+    if args.temperature != 1.0:
+        folder_name = f"{folder_name}_temp_{int(args.temperature * 1000)}"
+    if args.repetition_penalty != 1.0:
+        folder_name = (
+            f"{folder_name}_repetition_penalty_{int(args.repetition_penalty * 1000)}"
+        )
+    if args.num_beams > 1:
+        folder_name = f"{folder_name}_num_beams_{int(args.num_beams)}"
+    if args.num_beam_groups > 1:
+        folder_name = f"{folder_name}_num_beam_groups_{int(args.num_beam_groups)}"
+    if args.epsilon_cutoff > 0.0:
+        folder_name = (
+            f"{folder_name}_epsilon_cutoff_{int(args.epsilon_cutoff * 100000)}"
+        )
+    return folder_name
+
+
+def is_clinical_event(token: str) -> bool:
+    return token.isnumeric()
+
+
+def is_visit_start(token: str) -> bool:
     return token in ["VS", "[VS]"]
 
 
-def is_visit_end(token: str):
+def is_visit_end(token: str) -> bool:
     return token in ["VE", "[VE]"]
 
 
@@ -109,6 +178,22 @@ def is_att_token(token: str):
     elif token[:2] == "i-" and not token.startswith(
         "i-H"
     ):  # i-D7 and exclude hour tokens
+        return True
+    return False
+
+
+def is_artificial_token(token: str) -> bool:
+    if token in VISIT_CONCEPT_IDS:
+        return True
+    if token in DISCHARGE_CONCEPT_IDS:
+        return True
+    if is_visit_start(token):
+        return True
+    if is_visit_end(token):
+        return True
+    if is_att_token(token):
+        return True
+    if token == END_TOKEN:
         return True
     return False
 
