@@ -1,4 +1,5 @@
 import json
+import os.path
 from datetime import datetime
 from pathlib import Path
 
@@ -18,7 +19,6 @@ from cehrbert.runners.runner_util import (
     get_last_hf_checkpoint,
     get_meds_extension_path,
     load_parquet_as_dataset,
-    parse_runner_args,
 )
 from datasets import DatasetDict, load_from_disk
 from peft import LoraConfig, PeftModel, get_peft_model
@@ -36,6 +36,7 @@ from cehrgpt.models.hf_cehrgpt import (
     CEHRGPTPreTrainedModel,
 )
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.runners.gpt_runner_util import parse_runner_args
 
 LOG = logging.get_logger("transformers")
 
@@ -74,7 +75,7 @@ def load_finetuned_model(
 
 
 def main():
-    data_args, model_args, training_args = parse_runner_args()
+    cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
 
     tokenizer = load_pretrained_tokenizer(model_args)
     prepared_ds_path = generate_prepared_ds_path(
@@ -247,6 +248,21 @@ def main():
         final_splits = DatasetDict(
             {"train": train_set, "validation": validation_set, "test": test_set}
         )
+
+        if cehrgpt_args.expand_tokenizer:
+            new_tokenizer_path = os.path.expanduser(training_args.output_dir)
+            try:
+                tokenizer = CehrGptTokenizer.from_pretrained(new_tokenizer_path)
+            except Exception:
+                tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
+                    cehrgpt_tokenizer=tokenizer,
+                    dataset=final_splits["train"],
+                    feature_names=["concept_ids"],
+                    data_args=data_args,
+                    concept_name_mapping={},
+                )
+                tokenizer.save_pretrained(os.path.expanduser(training_args.output_dir))
+
         processed_dataset = create_cehrgpt_finetuning_dataset(
             dataset=final_splits, cehrgpt_tokenizer=tokenizer, data_args=data_args
         )
@@ -270,6 +286,14 @@ def main():
 
     if training_args.do_train:
         model = load_finetuned_model(model_args, model_args.model_name_or_path)
+        # Enable include_values when include_values is set to be False during pre-training
+        if model_args.include_values and not model.cehrgpt.include_values:
+            model.cehrgpt.include_values = True
+        # Enable position embeddings when position embeddings are disabled in pre-training
+        if not model_args.exclude_position_ids and model.cehrgpt.exclude_position_ids:
+            model.cehrgpt.exclude_position_ids = False
+        if cehrgpt_args.expand_tokenizer:
+            model.resize_token_embeddings(tokenizer.vocab_size)
         # If lora is enabled, we add LORA adapters to the model
         if model_args.use_lora:
             # When LORA is used, the trainer could not automatically find this label,
