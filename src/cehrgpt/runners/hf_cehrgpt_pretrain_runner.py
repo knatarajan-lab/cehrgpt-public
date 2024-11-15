@@ -13,7 +13,6 @@ from cehrbert.runners.runner_util import (
     get_last_hf_checkpoint,
     get_meds_extension_path,
     load_parquet_as_dataset,
-    parse_runner_args,
 )
 from datasets import Dataset, DatasetDict, IterableDatasetDict, load_from_disk
 from transformers import AutoConfig, Trainer, set_seed
@@ -24,19 +23,19 @@ from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
 from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.runners.gpt_runner_util import parse_runner_args
+from src.cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 
 LOG = logging.get_logger("transformers")
 
 
-def tokenizer_exists(model_args: ModelArguments) -> bool:
+def tokenizer_exists(tokenizer_name_or_path: str) -> bool:
     # Try to load the pretrained tokenizer
     try:
-        CehrGptTokenizer.from_pretrained(
-            os.path.abspath(model_args.tokenizer_name_or_path)
-        )
+        CehrGptTokenizer.from_pretrained(os.path.abspath(tokenizer_name_or_path))
         return True
     except Exception:
-        LOG.info(f"The tokenizer does not exist at {model_args.tokenizer_name_or_path}")
+        LOG.info(f"The tokenizer does not exist at {tokenizer_name_or_path}")
         return False
 
 
@@ -66,13 +65,26 @@ def load_and_create_tokenizer(
 
 
 def load_and_create_model(
-    model_args: ModelArguments, tokenizer: CehrGptTokenizer
+    model_args: ModelArguments,
+    cehrgpt_args: CehrGPTArguments,
+    tokenizer: CehrGptTokenizer,
 ) -> CEHRGPT2LMHeadModel:
     attn_implementation = (
         "flash_attention_2" if is_flash_attn_2_available() else "eager"
     )
+
+    model_abspath = os.path.expanduser(model_args.model_name_or_path)
+    if cehrgpt_args.continue_pretrain:
+        try:
+            return CEHRGPT2LMHeadModel.from_pretrained(model_abspath)
+        except Exception as e:
+            LOG.error(
+                f"When continue_pretrain is set to True, it assumes that CEHR-GPT has been trained "
+                f"and will be used to pretrain on new datasets. The CEHR-GPT checkpoint must exist at {model_abspath}"
+            )
+            raise e
+
     try:
-        model_abspath = os.path.abspath(model_args.model_name_or_path)
         model_config = AutoConfig.from_pretrained(
             model_abspath, attn_implementation=attn_implementation
         )
@@ -92,7 +104,7 @@ def load_and_create_model(
 
 
 def main():
-    data_args, model_args, training_args = parse_runner_args()
+    cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
 
     if data_args.streaming:
         # This is for disabling the warning message https://github.com/huggingface/transformers/issues/5486
@@ -109,28 +121,34 @@ def main():
         processed_dataset = load_from_disk(data_args.data_folder)
         # If the data has been processed in the past, it's assume the tokenizer has been created before.
         # we load the CEHR-GPT tokenizer from the output folder, otherwise an exception will be raised.
-        if not tokenizer_exists(model_args):
+        tokenizer_name_or_path = os.path.expanduser(
+            training_args.output_dir
+            if cehrgpt_args.expand_tokenizer
+            else model_args.tokenizer_name_or_path
+        )
+        if not tokenizer_exists(tokenizer_name_or_path):
             raise RuntimeError(
                 f"The dataset has been tokenized but the corresponding tokenizer: "
                 f"{model_args.tokenizer_name_or_path} does not exist"
             )
-        cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
-            model_args.tokenizer_name_or_path
-        )
+        cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_name_or_path)
     elif any(prepared_ds_path.glob("*")):
         LOG.info(f"Loading prepared dataset from disk at {prepared_ds_path}...")
         processed_dataset = load_from_disk(str(prepared_ds_path))
         LOG.info("Prepared dataset loaded from disk...")
         # If the data has been processed in the past, it's assume the tokenizer has been created before.
         # we load the CEHR-GPT tokenizer from the output folder, otherwise an exception will be raised.
-        if not tokenizer_exists(model_args):
+        tokenizer_name_or_path = os.path.expanduser(
+            training_args.output_dir
+            if cehrgpt_args.expand_tokenizer
+            else model_args.tokenizer_name_or_path
+        )
+        if not tokenizer_exists(tokenizer_name_or_path):
             raise RuntimeError(
                 f"The dataset has been tokenized but the corresponding tokenizer: "
                 f"{model_args.tokenizer_name_or_path} does not exist"
             )
-        cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
-            model_args.tokenizer_name_or_path
-        )
+        cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_name_or_path)
     else:
         # If the data is in the MEDS format, we need to convert it to the CEHR-BERT format
         if data_args.is_data_in_med:
@@ -193,6 +211,23 @@ def main():
         cehrgpt_tokenizer = load_and_create_tokenizer(
             data_args=data_args, model_args=model_args, dataset=dataset
         )
+        # Retrain the tokenizer in case we want to pretrain the model further using different datasets
+        if cehrgpt_args.expand_tokenizer:
+            new_tokenizer_path = os.path.expanduser(training_args.output_dir)
+            try:
+                cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(new_tokenizer_path)
+            except Exception:
+                cehrgpt_tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
+                    cehrgpt_tokenizer=cehrgpt_tokenizer,
+                    dataset=dataset["train"],
+                    feature_names=["concept_ids"],
+                    data_args=data_args,
+                    concept_name_mapping={},
+                )
+                cehrgpt_tokenizer.save_pretrained(
+                    os.path.expanduser(training_args.output_dir)
+                )
+
         # sort the patient features chronologically and tokenize the data
         processed_dataset = create_cehrgpt_pretraining_dataset(
             dataset=dataset, cehrgpt_tokenizer=cehrgpt_tokenizer, data_args=data_args
@@ -222,7 +257,10 @@ def main():
     else:
         processed_dataset = processed_dataset.filter(filter_func, **filter_args)
 
-    model = load_and_create_model(model_args, cehrgpt_tokenizer)
+    model = load_and_create_model(model_args, cehrgpt_args, cehrgpt_tokenizer)
+    # Expand tokenizer to adapt to the new pretraining dataset
+    if model.config.vocab_size < cehrgpt_tokenizer.vocab_size:
+        model.resize_token_embeddings(cehrgpt_tokenizer.vocab_size)
 
     # Detecting last checkpoint.
     last_checkpoint = get_last_hf_checkpoint(training_args)
