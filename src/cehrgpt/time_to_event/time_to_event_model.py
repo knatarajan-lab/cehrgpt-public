@@ -5,10 +5,15 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from cehrbert_data.decorators.patient_event_decorator import time_month_token
+from cehrbert_data.decorators.patient_event_decorator_base import time_month_token
 from transformers import GenerationConfig
 
-from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token, is_visit_end
+from cehrgpt.gpt_utils import (
+    extract_time_interval_in_days,
+    is_att_token,
+    is_visit_end,
+    is_visit_start,
+)
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
@@ -18,7 +23,7 @@ class TimeToEvent:
     average_time: float
     median_time: float
     standard_deviation: float
-    most_likely_time: int
+    most_likely_time: str
     num_of_simulations: int
     time_intervals: List[int]
     outcome_events: List[str]
@@ -108,9 +113,13 @@ class TimeToEventModel:
                 )
                 # Clear the cache
                 torch.cuda.empty_cache()
-            simulated_sequences.extend(
-                [self.tokenizer.decode(seq.cpu().numpy()) for seq in results.sequences]
-            )
+                # Add the sequences to the result array
+                simulated_sequences.extend(
+                    [
+                        self.tokenizer.decode(seq.cpu().numpy())
+                        for seq in results.sequences
+                    ]
+                )
 
         self.generation_config.num_return_sequences = old_num_return_sequences
         return simulated_sequences
@@ -122,33 +131,63 @@ class TimeToEventModel:
         future_visit_end: int = -1,
         prediction_window_start: int = 0,
         prediction_window_end: int = 365,
+        debug: bool = False,
+        max_n_trial: int = 2,
     ) -> Optional[TimeToEvent]:
-
         patient_history_length = len(partial_history)
-        simulated_seqs = self.simulate(partial_history)
-
         time_event_tuples = []
-        for seq in simulated_seqs:
-            visit_counter = 0
-            time_delta = 0
-            for next_token in seq[patient_history_length:]:
-                visit_counter += int(is_visit_end(next_token))
-                if (
-                    visit_counter > future_visit_end != -1
-                    or time_delta > prediction_window_end != -1
-                ):
-                    break
-                if is_att_token(next_token):
-                    time_delta += extract_time_interval_in_days(next_token)
-                elif (
-                    visit_counter >= future_visit_start
-                    and time_delta >= prediction_window_start
-                ) and self.is_outcome_event(next_token):
-                    time_event_tuples.append((next_token, time_delta))
+        seqs_failed_to_convert = []
+        n_trial = 0
+        num_return_sequences = self.generation_config.num_return_sequences
+        max_new_tokens = self.generation_config.max_new_tokens
+        while (
+            len(time_event_tuples) < self.generation_config.num_return_sequences
+            and n_trial < max_n_trial
+        ):
+            self.generation_config.num_return_sequences = num_return_sequences - len(
+                time_event_tuples
+            )
+            # self.generation_config.max_new_tokens = max_new_tokens * (n_trial + 1)
+            simulated_seqs = self.simulate(partial_history)
+            n_trial += 1
+            for seq in simulated_seqs:
+                visit_counter = 0
+                time_delta = 0
+                success = False
+                for next_token in seq[patient_history_length:]:
+                    visit_counter += int(is_visit_start(next_token))
+                    if (
+                        visit_counter > future_visit_end != -1
+                        or time_delta > prediction_window_end != -1
+                    ):
+                        time_event_tuples.append(("0", time_delta))
+                        success = True
+                        break
+                    if is_att_token(next_token):
+                        time_delta += extract_time_interval_in_days(next_token)
+                    elif (
+                        visit_counter >= future_visit_start
+                        and time_delta >= prediction_window_start
+                    ) and self.is_outcome_event(next_token):
+                        time_event_tuples.append((next_token, time_delta))
+                        success = True
+                        break
+                if not success:
+                    # This indicates the generated sequence did not satisfy the criteria
+                    if future_visit_end != -1 or prediction_window_end != -1:
+                        seqs_failed_to_convert.append(seq[patient_history_length:])
+                    else:
+                        time_event_tuples.append(("0", time_delta))
+
+        self.generation_config.num_return_sequences = num_return_sequences
+        self.generation_config.max_new_tokens = max_new_tokens
+
+        if debug:
+            print(f"seqs_failed_to_convert: {seqs_failed_to_convert}")
 
         # Count the occurrences of each time tokens for each concept
         return (
-            create_time_to_event(time_event_tuples, len(simulated_seqs))
+            create_time_to_event(time_event_tuples, len(time_event_tuples))
             if len(time_event_tuples) > 0
             else None
         )

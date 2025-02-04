@@ -1,6 +1,7 @@
 import os
 from typing import Optional, Union
 
+import torch
 from cehrbert.data_generators.hf_data_generator.meds_utils import (
     create_dataset_from_meds_reader,
 )
@@ -15,13 +16,14 @@ from cehrbert.runners.runner_util import (
     load_parquet_as_dataset,
 )
 from datasets import Dataset, DatasetDict, IterableDatasetDict, load_from_disk
-from transformers import AutoConfig, Trainer, set_seed
+from transformers import AutoConfig, Trainer, TrainingArguments, set_seed
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_pretraining_dataset
 from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
 from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
+from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from src.cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
@@ -42,10 +44,11 @@ def tokenizer_exists(tokenizer_name_or_path: str) -> bool:
 def load_and_create_tokenizer(
     data_args: DataTrainingArguments,
     model_args: ModelArguments,
+    cehrgpt_args: CehrGPTArguments,
     dataset: Optional[Union[Dataset, DatasetDict]] = None,
 ) -> CehrGptTokenizer:
     # Try to load the pretrained tokenizer
-    tokenizer_abspath = os.path.abspath(model_args.tokenizer_name_or_path)
+    tokenizer_abspath = os.path.expanduser(model_args.tokenizer_name_or_path)
     try:
         tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_abspath)
     except Exception as e:
@@ -55,9 +58,11 @@ def load_and_create_tokenizer(
                 f"Failed to load the tokenizer from {tokenizer_abspath} with the error \n{e}\n"
                 f"Tried to create the tokenizer, however the dataset is not provided."
             )
-
         tokenizer = CehrGptTokenizer.train_tokenizer(
-            dataset, ["concept_ids"], {}, data_args
+            dataset,
+            {},
+            data_args,
+            PretrainedEmbeddings(cehrgpt_args.pretrained_embedding_path),
         )
         tokenizer.save_pretrained(tokenizer_abspath)
 
@@ -67,40 +72,70 @@ def load_and_create_tokenizer(
 def load_and_create_model(
     model_args: ModelArguments,
     cehrgpt_args: CehrGPTArguments,
+    training_args: TrainingArguments,
     tokenizer: CehrGptTokenizer,
 ) -> CEHRGPT2LMHeadModel:
     attn_implementation = (
         "flash_attention_2" if is_flash_attn_2_available() else "eager"
     )
-
+    torch_dtype = torch.bfloat16 if training_args.bf16 else torch.float32
     model_abspath = os.path.expanduser(model_args.model_name_or_path)
     if cehrgpt_args.continue_pretrain:
         try:
-            return CEHRGPT2LMHeadModel.from_pretrained(model_abspath)
+            return CEHRGPT2LMHeadModel.from_pretrained(
+                model_abspath,
+                attn_implementation=attn_implementation,
+                torch_dtype=torch_dtype,
+            )
         except Exception as e:
             LOG.error(
                 f"When continue_pretrain is set to True, it assumes that CEHR-GPT has been trained "
                 f"and will be used to pretrain on new datasets. The CEHR-GPT checkpoint must exist at {model_abspath}"
             )
             raise e
-
     try:
         model_config = AutoConfig.from_pretrained(
             model_abspath, attn_implementation=attn_implementation
         )
     except Exception as e:
         LOG.warning(e)
+        if cehrgpt_args.causal_sfm:
+            model_args.max_position_embeddings += 1
+        if len(tokenizer.pretrained_token_ids) > 0:
+            pretrained_embedding_dim = tokenizer.pretrained_embeddings.shape[1]
+        else:
+            pretrained_embedding_dim = model_args.hidden_size
         model_config = CEHRGPTConfig(
             vocab_size=tokenizer.vocab_size,
+            value_vocab_size=tokenizer.value_vocab_size,
             time_token_vocab_size=tokenizer.time_token_vocab_size,
             bos_token_id=tokenizer.end_token_id,
             eos_token_id=tokenizer.end_token_id,
             lab_token_ids=tokenizer.lab_token_ids,
             token_to_time_token_mapping=tokenizer.token_to_time_token_mapping,
             attn_implementation=attn_implementation,
+            causal_sfm=cehrgpt_args.causal_sfm,
+            demographics_size=cehrgpt_args.demographics_size,
+            lab_token_penalty=cehrgpt_args.lab_token_penalty,
+            lab_token_loss_weight=cehrgpt_args.lab_token_loss_weight,
+            entropy_penalty=cehrgpt_args.entropy_penalty,
+            entropy_penalty_alpha=cehrgpt_args.entropy_penalty_alpha,
+            n_pretrained_embeddings_layers=cehrgpt_args.n_pretrained_embeddings_layers,
+            use_pretrained_embeddings=len(tokenizer.pretrained_token_ids) > 0,
+            pretrained_embedding_dim=pretrained_embedding_dim,
             **model_args.as_dict(),
         )
-    return CEHRGPT2LMHeadModel(model_config)
+    model = CEHRGPT2LMHeadModel(model_config)
+    if tokenizer.pretrained_token_ids:
+        model.cehrgpt.update_pretrained_embeddings(
+            tokenizer.pretrained_token_ids,
+            tokenizer.pretrained_embeddings,
+        )
+    if model.config.torch_dtype == torch.bfloat16:
+        return model.bfloat16()
+    elif model.config.torch_dtype == torch.float16:
+        return model.half()
+    return model
 
 
 def main():
@@ -151,7 +186,7 @@ def main():
         cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_name_or_path)
     else:
         # If the data is in the MEDS format, we need to convert it to the CEHR-BERT format
-        if data_args.is_data_in_med:
+        if data_args.is_data_in_meds:
             meds_extension_path = get_meds_extension_path(
                 data_folder=data_args.data_folder,
                 dataset_prepared_path=data_args.dataset_prepared_path,
@@ -209,7 +244,10 @@ def main():
 
         # Create the CEHR-GPT tokenizer if it's not available in the output folder
         cehrgpt_tokenizer = load_and_create_tokenizer(
-            data_args=data_args, model_args=model_args, dataset=dataset
+            data_args=data_args,
+            model_args=model_args,
+            cehrgpt_args=cehrgpt_args,
+            dataset=dataset,
         )
         # Retrain the tokenizer in case we want to pretrain the model further using different datasets
         if cehrgpt_args.expand_tokenizer:
@@ -220,9 +258,11 @@ def main():
                 cehrgpt_tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
                     cehrgpt_tokenizer=cehrgpt_tokenizer,
                     dataset=dataset["train"],
-                    feature_names=["concept_ids"],
                     data_args=data_args,
                     concept_name_mapping={},
+                    pretrained_concept_embedding_model=PretrainedEmbeddings(
+                        cehrgpt_args.pretrained_embedding_path
+                    ),
                 )
                 cehrgpt_tokenizer.save_pretrained(
                     os.path.expanduser(training_args.output_dir)
@@ -237,7 +277,13 @@ def main():
             processed_dataset.save_to_disk(prepared_ds_path)
 
     def filter_func(examples):
-        return [_ >= data_args.min_num_tokens for _ in examples["num_of_concepts"]]
+        if cehrgpt_args.drop_long_sequences:
+            return [
+                model_args.max_position_embeddings >= _ >= data_args.min_num_tokens
+                for _ in examples["num_of_concepts"]
+            ]
+        else:
+            return [_ >= data_args.min_num_tokens for _ in examples["num_of_concepts"]]
 
     # Create the args for batched filtering
     filter_args = {"batched": True, "batch_size": data_args.preprocessing_batch_size}
@@ -257,10 +303,29 @@ def main():
     else:
         processed_dataset = processed_dataset.filter(filter_func, **filter_args)
 
-    model = load_and_create_model(model_args, cehrgpt_args, cehrgpt_tokenizer)
+    model = load_and_create_model(
+        model_args, cehrgpt_args, training_args, cehrgpt_tokenizer
+    )
+
     # Expand tokenizer to adapt to the new pretraining dataset
     if model.config.vocab_size < cehrgpt_tokenizer.vocab_size:
         model.resize_token_embeddings(cehrgpt_tokenizer.vocab_size)
+        # Update the pretrained embedding weights if they are available
+        if model.config.use_pretrained_embeddings:
+            model.cehrgpt.update_pretrained_embeddings(
+                cehrgpt_tokenizer.pretrained_token_ids,
+                cehrgpt_tokenizer.pretrained_embeddings,
+            )
+        elif cehrgpt_tokenizer.pretrained_token_ids:
+            model.config.pretrained_embedding_dim = (
+                cehrgpt_tokenizer.pretrained_embeddings.shape[1]
+            )
+            model.config.use_pretrained_embeddings = True
+            model.cehrgpt.initialize_pretrained_embeddings()
+            model.cehrgpt.update_pretrained_embeddings(
+                cehrgpt_tokenizer.pretrained_token_ids,
+                cehrgpt_tokenizer.pretrained_embeddings,
+            )
 
     # Detecting last checkpoint.
     last_checkpoint = get_last_hf_checkpoint(training_args)
@@ -271,26 +336,18 @@ def main():
     if not data_args.streaming:
         processed_dataset.set_format("pt")
 
-    eval_dataset = None
-    if isinstance(processed_dataset, DatasetDict):
-        train_dataset = processed_dataset["train"]
-        if "test" in processed_dataset:
-            eval_dataset = processed_dataset["test"]
-    else:
-        train_dataset = processed_dataset
-
     trainer = Trainer(
         model=model,
         data_collator=CehrGptDataCollator(
             tokenizer=cehrgpt_tokenizer,
             max_length=model_args.max_position_embeddings,
             shuffle_records=data_args.shuffle_records,
-            include_values=model_args.include_values,
             include_ttv_prediction=model_args.include_ttv_prediction,
             use_sub_time_tokenization=model_args.use_sub_time_tokenization,
+            include_values=model_args.include_values,
         ),
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
+        train_dataset=processed_dataset["train"],
+        eval_dataset=processed_dataset["test"],
         args=training_args,
     )
 

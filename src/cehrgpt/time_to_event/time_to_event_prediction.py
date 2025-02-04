@@ -1,9 +1,9 @@
 import datetime
+import glob
 import os
 import shutil
 import uuid
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -59,7 +59,11 @@ def main(args):
             attn_implementation=(
                 "flash_attention_2" if is_flash_attn_2_available() else "eager"
             ),
-            torch_dtype=torch.bfloat16 if is_flash_attn_2_available() else "auto",
+            torch_dtype=(
+                torch.bfloat16
+                if is_flash_attn_2_available() and args.use_bfloat16
+                else "auto"
+            ),
         )
         .eval()
         .to(get_device())
@@ -106,12 +110,17 @@ def main(args):
     LOG.info(f"Loading dataset_folder at {args.dataset_folder}")
     LOG.info(f"Write time sensitive predictions to {prediction_output_folder_name}")
     LOG.info(f"Context window {args.context_window}")
+    LOG.info(f"Number of new tokens {task_config.max_new_tokens}")
     LOG.info(f"Temperature {args.temperature}")
     LOG.info(f"Repetition Penalty {args.repetition_penalty}")
     LOG.info(f"Sampling Strategy {args.sampling_strategy}")
     LOG.info(f"Epsilon cutoff {args.epsilon_cutoff}")
     LOG.info(f"Top P {args.top_p}")
     LOG.info(f"Top K {args.top_k}")
+
+    cehrgpt_model.resize_position_embeddings(
+        cehrgpt_model.config.max_position_embeddings + task_config.max_new_tokens
+    )
 
     generation_config = TimeToEventModel.get_generation_config(
         tokenizer=cehrgpt_tokenizer,
@@ -138,6 +147,7 @@ def main(args):
         return [_ >= args.min_num_of_concepts for _ in examples["num_of_concepts"]]
 
     test_dataset = dataset.filter(filter_func, batched=True, batch_size=1000)
+    test_dataset = test_dataset.shuffle(seed=42)
 
     # Filter out the records for which the predictions have been generated previously
     test_dataset = filter_out_existing_results(
@@ -176,6 +186,8 @@ def main(args):
             task_config.future_visit_end,
             task_config.prediction_window_start,
             task_config.prediction_window_end,
+            args.debug,
+            args.max_n_trial,
         )
         visit_counter = sum([int(is_visit_end(_)) for _ in partial_history])
         tte_outputs.append(
@@ -248,11 +260,10 @@ def acquire_lock_or_skip_if_already_exist(output_folder: str, sample_id: str):
 def filter_out_existing_results(
     test_dataset: Dataset, prediction_output_folder_name: str
 ):
-    if any(Path(prediction_output_folder_name).glob("*parquet")):
+    parquet_files = glob.glob(os.path.join(prediction_output_folder_name, "*parquet"))
+    if parquet_files:
         cohort_members = set()
-        results_dataframe = pd.read_parquet(prediction_output_folder_name)[
-            ["person_id", "index_date"]
-        ]
+        results_dataframe = pd.read_parquet(parquet_files)[["person_id", "index_date"]]
         for row in results_dataframe.itertuples():
             cohort_members.add((row.person_id, row.index_date.strftime("%Y-%m-%d")))
 
@@ -315,6 +326,19 @@ def create_arg_parser():
     )
     base_arg_parser.add_argument(
         "--concept_ancestor", dest="concept_ancestor", action="store", required=False
+    )
+    base_arg_parser.add_argument(
+        "--debug",
+        dest="debug",
+        action="store_true",
+    )
+    base_arg_parser.add_argument(
+        "--max_n_trial",
+        dest="max_n_trial",
+        action="store",
+        type=int,
+        default=2,
+        required=False,
     )
     return base_arg_parser
 

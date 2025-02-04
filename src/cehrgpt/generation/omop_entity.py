@@ -1,20 +1,39 @@
 from abc import ABC, abstractmethod
 from datetime import date, datetime
+from typing import Union
 
 
-def fill_datetime(year: int):
-    return datetime.strptime(str(year) + "-01" + "-01", "%Y-%m-%d").isoformat()
+def fill_datetime(year: int) -> str:
+    """Helper function to create an ISO 8601 datetime string for 01/01 of a given year."""
+    return datetime.strptime(f"{year}-01-01", "%Y-%m-%d").isoformat()
 
 
-def fill_start_datetime(date: date):
-    return datetime.combine(date, datetime.min.time()).isoformat()
+def fill_start_datetime(d: Union[date, datetime]) -> str:
+    """Helper function to create an ISO 8601 string at 00:00:00 (start of day)."""
+    if isinstance(d, datetime):
+        return d.isoformat()
+    elif isinstance(d, date):
+        return datetime.combine(d, datetime.min.time()).isoformat()
+    raise RuntimeError(f"{type(d)} is not supported by this function.")
 
 
-def fill_end_datetime(date: date):
-    return datetime.combine(date, datetime.max.time()).isoformat()
+def fill_end_datetime(d: Union[date, datetime]) -> str:
+    """Helper function to create an ISO 8601 string at 23:59:59.999999 (end of day)."""
+    if isinstance(d, datetime):
+        return d.isoformat()
+    elif isinstance(d, date):
+        return datetime.combine(d, datetime.max.time()).isoformat()
+    raise RuntimeError(f"{type(d)} is not supported by this function.")
 
 
 class OmopEntity(ABC):
+    """
+    Abstract base class that all OMOP CDM entities inherit from.
+
+    Ensures that each entity can export its data as JSON,
+    retrieve its schema, and provide a table name.
+    """
+
     @abstractmethod
     def export_as_json(self):
         pass
@@ -29,6 +48,10 @@ class OmopEntity(ABC):
         pass
 
 
+# -----------------------------------------------------------------------------
+# PERSON
+# https://ohdsi.github.io/CommonDataModel/cdm54.html#person
+# -----------------------------------------------------------------------------
 class Person(OmopEntity):
     def __init__(self, person_id, gender_concept_id, year_of_birth, race_concept_id):
         self._person_id = person_id
@@ -51,7 +74,7 @@ class Person(OmopEntity):
             "care_site_id": 0,
             "person_source_value": "",
             "gender_source_value": "",
-            "gender_souce_concept_id": 0,
+            "gender_source_concept_id": 0,
             "race_source_value": "",
             "race_source_concept_id": 0,
             "ethnicity_source_value": "",
@@ -74,7 +97,7 @@ class Person(OmopEntity):
             "care_site_id": int,
             "person_source_value": str,
             "gender_source_value": str,
-            "gender_souce_concept_id": int,
+            "gender_source_concept_id": int,
             "race_source_value": str,
             "race_source_concept_id": int,
             "ethnicity_source_value": str,
@@ -85,21 +108,25 @@ class Person(OmopEntity):
         return "person"
 
 
+# -----------------------------------------------------------------------------
+# VISIT_OCCURRENCE
+# https://ohdsi.github.io/CommonDataModel/cdm54.html#visit_occurrence
+# -----------------------------------------------------------------------------
 class VisitOccurrence(OmopEntity):
     def __init__(
         self,
         visit_occurrence_id: int,
         visit_concept_id: int,
-        visit_start_date: date,
+        visit_start_datetime: datetime,
         person: Person,
         discharged_to_concept_id: int = 0,
     ):
         self._visit_occurrence_id = visit_occurrence_id
         self._visit_concept_id = visit_concept_id
-        self._visit_start_date = visit_start_date
-        self._visit_start_datetime = fill_start_datetime(self._visit_start_date)
-        self._visit_end_date = visit_start_date
-        self._visit_end_datetime = fill_end_datetime(self._visit_end_date)
+        self._visit_start_date = visit_start_datetime.date()
+        self._visit_start_datetime = fill_start_datetime(visit_start_datetime)
+        self._visit_end_date = visit_start_datetime.date()
+        self._visit_end_datetime = fill_end_datetime(visit_start_datetime)
         self._person = person
         self._discharged_to_concept_id = discharged_to_concept_id
 
@@ -112,13 +139,13 @@ class VisitOccurrence(OmopEntity):
             "visit_start_datetime": self._visit_start_datetime,
             "visit_end_date": self._visit_end_date,
             "visit_end_datetime": self._visit_end_datetime,
-            "visit_type_concept_id": 44818702,
+            "visit_type_concept_id": 44818702,  # default concept (e.g. Inpatient Visit)
             "provider_id": 0,
             "care_site_id": 0,
             "visit_source_value": "",
             "visit_source_concept_id": self._visit_concept_id,
-            "admitting_source_concept_id": 0,
-            "admitting_source_value": "",
+            "admitted_from_concept_id": 0,  # replaced "admitting_source_concept_id"
+            "admitted_from_source_value": "",  # replaced "admitting_source_value"
             "discharged_to_concept_id": self._discharged_to_concept_id,
             "discharged_to_source_value": "",
             "preceding_visit_occurrence_id": 0,
@@ -139,8 +166,8 @@ class VisitOccurrence(OmopEntity):
             "care_site_id": int,
             "visit_source_value": str,
             "visit_source_concept_id": int,
-            "admitting_source_concept_id": int,
-            "admitting_source_value": str,
+            "admitted_from_concept_id": int,
+            "admitted_from_source_value": str,
             "discharged_to_concept_id": int,
             "discharged_to_source_value": str,
             "preceding_visit_occurrence_id": int,
@@ -157,30 +184,33 @@ class VisitOccurrence(OmopEntity):
     def discharged_to_concept_id(self):
         return self._discharged_to_concept_id
 
-    # a setter function
-    def set_discharged_to_concept_id(self, discharged_to_concept_id):
+    def set_discharged_to_concept_id(self, discharged_to_concept_id: int):
         self._discharged_to_concept_id = discharged_to_concept_id
 
-    def set_visit_end_date(self, visit_end_date):
-        self._visit_end_date = visit_end_date
+    def set_visit_end_date(self, visit_end_datetime: datetime):
+        self._visit_end_date = visit_end_datetime.date()
+        self._visit_end_datetime = fill_end_datetime(visit_end_datetime)
 
 
+# -----------------------------------------------------------------------------
+# CONDITION_OCCURRENCE
+# https://ohdsi.github.io/CommonDataModel/cdm54.html#condition_occurrence
+# -----------------------------------------------------------------------------
 class ConditionOccurrence(OmopEntity):
-
     def __init__(
         self,
-        condition_occurrence_id,
-        condition_concept_id,
+        condition_occurrence_id: int,
+        condition_concept_id: int,
         visit_occurrence: VisitOccurrence,
-        condition_date: date,
+        condition_datetime: datetime,
     ):
         self._condition_occurrence_id = condition_occurrence_id
         self._condition_concept_id = condition_concept_id
         self._visit_occurrence = visit_occurrence
-        self._condition_start_date = condition_date
-        self._condition_start_datetime = fill_start_datetime(condition_date)
-        self._condition_end_date = condition_date
-        self._condition_end_datetime = fill_end_datetime(condition_date)
+        self._condition_start_date = condition_datetime.date()
+        self._condition_start_datetime = fill_start_datetime(condition_datetime)
+        self._condition_end_date = condition_datetime.date()
+        self._condition_end_datetime = fill_start_datetime(condition_datetime)
 
     def export_as_json(self):
         return {
@@ -191,7 +221,7 @@ class ConditionOccurrence(OmopEntity):
             "condition_start_datetime": self._condition_start_datetime,
             "condition_end_date": self._condition_end_date,
             "condition_end_datetime": self._condition_end_datetime,
-            "condition_type_concept_id": 32817,
+            "condition_type_concept_id": 32817,  # default concept
             "stop_reason": "",
             "provider_id": 0,
             "visit_occurrence_id": self._visit_occurrence._visit_occurrence_id,
@@ -227,22 +257,25 @@ class ConditionOccurrence(OmopEntity):
         return "condition_occurrence"
 
 
+# -----------------------------------------------------------------------------
+# DRUG_EXPOSURE
+# https://ohdsi.github.io/CommonDataModel/cdm54.html#drug_exposure
+# -----------------------------------------------------------------------------
 class DrugExposure(OmopEntity):
-
     def __init__(
         self,
-        drug_exposure_id,
-        drug_concept_id,
+        drug_exposure_id: int,
+        drug_concept_id: int,
         visit_occurrence: VisitOccurrence,
-        drug_date: date,
+        drug_datetime: datetime,
     ):
         self._drug_exposure_id = drug_exposure_id
         self._drug_concept_id = drug_concept_id
         self._visit_occurrence = visit_occurrence
-        self._drug_exposure_start_date = drug_date
-        self._drug_exposure_start_datetime = fill_start_datetime(drug_date)
-        self._drug_exposure_end_date = drug_date
-        self._drug_exposure_end_datetime = fill_end_datetime(drug_date)
+        self._drug_exposure_start_date = drug_datetime.date()
+        self._drug_exposure_start_datetime = fill_start_datetime(drug_datetime)
+        self._drug_exposure_end_date = drug_datetime.date()
+        self._drug_exposure_end_datetime = fill_start_datetime(drug_datetime)
 
     def export_as_json(self):
         return {
@@ -254,7 +287,7 @@ class DrugExposure(OmopEntity):
             "drug_exposure_end_date": self._drug_exposure_end_date,
             "drug_exposure_end_datetime": self._drug_exposure_end_datetime,
             "verbatim_end_date": self._drug_exposure_end_date,
-            "drug_type_concept_id": 38000177,
+            "drug_type_concept_id": 38000177,  # default concept
             "stop_reason": "",
             "refills": None,
             "quantity": None,
@@ -303,20 +336,23 @@ class DrugExposure(OmopEntity):
         return "drug_exposure"
 
 
+# -----------------------------------------------------------------------------
+# PROCEDURE_OCCURRENCE
+# https://ohdsi.github.io/CommonDataModel/cdm54.html#procedure_occurrence
+# -----------------------------------------------------------------------------
 class ProcedureOccurrence(OmopEntity):
-
     def __init__(
         self,
-        procedure_occurrence_id,
-        procedure_concept_id,
+        procedure_occurrence_id: int,
+        procedure_concept_id: int,
         visit_occurrence: VisitOccurrence,
-        procedure_date: date,
+        procedure_datetime: datetime,
     ):
         self._procedure_occurrence_id = procedure_occurrence_id
         self._procedure_concept_id = procedure_concept_id
         self._visit_occurrence = visit_occurrence
-        self._procedure_date = procedure_date
-        self._procedure_datetime = fill_start_datetime(procedure_date)
+        self._procedure_date = procedure_datetime.date()
+        self._procedure_datetime = fill_start_datetime(procedure_datetime)
 
     def export_as_json(self):
         return {
@@ -325,7 +361,7 @@ class ProcedureOccurrence(OmopEntity):
             "procedure_concept_id": self._procedure_concept_id,
             "procedure_date": self._procedure_date,
             "procedure_datetime": self._procedure_datetime,
-            "procedure_type_concept_id": 38000178,
+            "procedure_type_concept_id": 38000178,  # default
             "modifier_concept_id": 0,
             "quantity": 1,
             "provider_id": 0,
@@ -359,12 +395,16 @@ class ProcedureOccurrence(OmopEntity):
         return "procedure_occurrence"
 
 
+# -----------------------------------------------------------------------------
+# DEATH
+# https://ohdsi.github.io/CommonDataModel/cdm54.html#death
+# -----------------------------------------------------------------------------
 class Death(OmopEntity):
     def __init__(
         self,
-        person,
+        person: Person,
         death_date: date,
-        death_type_concept_id=0,
+        death_type_concept_id: int = 0,
     ):
         self._person = person
         self._death_date = death_date
@@ -398,22 +438,31 @@ class Death(OmopEntity):
         return "death"
 
 
+# -----------------------------------------------------------------------------
+# MEASUREMENT
+# https://ohdsi.github.io/CommonDataModel/cdm54.html#measurement
+# -----------------------------------------------------------------------------
 class Measurement(OmopEntity):
-
     def __init__(
         self,
-        measurement_id,
-        measurement_concept_id,
-        value_as_number,
+        measurement_id: int,
+        measurement_concept_id: int,
+        value_as_number: float,
+        is_numeric_type,
+        value_as_concept_id,
         visit_occurrence: VisitOccurrence,
-        measurement_date: date,
+        measurement_datetime: datetime,
+        unit_source_value,
     ):
         self._measurement_id = measurement_id
         self._measurement_concept_id = measurement_concept_id
         self._value_as_number = value_as_number
+        self._value_as_concept_id = value_as_concept_id
         self._visit_occurrence = visit_occurrence
-        self._measurement_date = measurement_date
-        self._measurement_datetime = fill_start_datetime(measurement_date)
+        self._measurement_date = measurement_datetime.date()
+        self._measurement_datetime = fill_start_datetime(measurement_datetime)
+        self._operator_concept_id = 4172703 if is_numeric_type == 1 else 0
+        self._unit_source_value = unit_source_value
 
     def export_as_json(self):
         return {
@@ -422,13 +471,20 @@ class Measurement(OmopEntity):
             "measurement_concept_id": self._measurement_concept_id,
             "measurement_date": self._measurement_date,
             "measurement_datetime": self._measurement_datetime,
+            "measurement_type_concept_id": 0,
+            "operator_concept_id": self._operator_concept_id,
             "value_as_number": self._value_as_number,
-            "operator_concept_id": 4172703,
+            "value_as_concept_id": self._value_as_concept_id,
+            "unit_concept_id": 0,
+            "range_low": None,
+            "range_high": None,
             "provider_id": 0,
             "visit_occurrence_id": self._visit_occurrence._visit_occurrence_id,
             "visit_detail_id": 0,
             "measurement_source_value": "",
             "measurement_source_concept_id": self._measurement_concept_id,
+            "unit_source_value": self._unit_source_value,
+            "value_source_value": "",
         }
 
     @classmethod
@@ -439,13 +495,20 @@ class Measurement(OmopEntity):
             "measurement_concept_id": int,
             "measurement_date": date,
             "measurement_datetime": datetime,
-            "value_as_number": float,
+            "measurement_type_concept_id": int,
             "operator_concept_id": int,
+            "value_as_number": float,
+            "value_as_concept_id": int,
+            "unit_concept_id": int,
+            "range_low": float,
+            "range_high": float,
             "provider_id": int,
             "visit_occurrence_id": int,
             "visit_detail_id": int,
             "measurement_source_value": str,
             "measurement_source_concept_id": int,
+            "unit_source_value": str,
+            "value_source_value": str,
         }
 
     def get_table_name(self):

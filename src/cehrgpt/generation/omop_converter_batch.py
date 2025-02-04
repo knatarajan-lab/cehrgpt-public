@@ -1,27 +1,19 @@
 import argparse
 import datetime
+import glob
 import os
 import uuid
-from datetime import date, timedelta
+from datetime import timedelta
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
-from cehrbert.models.hf_models.tokenization_utils import load_json_file
+import pyarrow.parquet as pq
 from tqdm import tqdm
 
-from cehrgpt.models.tokenization_hf_cehrgpt import END_TOKEN
-
-from ..gpt_utils import (
-    extract_time_interval_in_days,
-    generate_artificial_time_tokens,
-    is_inpatient_att_token,
-    is_visit_end,
-    is_visit_start,
-)
-from .omop_entity import (
+from cehrgpt.generation.omop_entity import (
     ConditionOccurrence,
     Death,
     DrugExposure,
@@ -31,6 +23,14 @@ from .omop_entity import (
     ProcedureOccurrence,
     VisitOccurrence,
 )
+from cehrgpt.gpt_utils import (
+    extract_time_interval_in_days,
+    generate_artificial_time_tokens,
+    is_inpatient_att_token,
+    is_visit_end,
+    is_visit_start,
+)
+from cehrgpt.models.tokenization_hf_cehrgpt import END_TOKEN
 
 # TODO: move these to cehrbert_data
 STOP_TOKENS = ["VE", "[VE]", END_TOKEN]
@@ -47,10 +47,9 @@ TABLE_LIST = [
     "death",
     "measurement",
 ]
-DISCHARGE_CONCEPT_LIST = [4216643, 4021968, 4146681]
+DISCHARGE_CONCEPT_LIST = [4216643, 4021968, 4146681, 4161979]
 OOV_CONCEPT_MAP = {
     1525734: "Drug",
-    1525543: "Drug",
     779414: "Drug",
     722117: "Drug",
     722118: "Drug",
@@ -171,15 +170,28 @@ def _is_none(x):
     return x is None or np.isnan(x)
 
 
-def gpt_to_omop_converter_serial(
+def get_num_records(parquet_files: List[str]):
+    total = 0
+    for file_path in parquet_files:
+        parquet_file = pq.ParquetFile(file_path)
+        total += parquet_file.metadata.num_rows
+    return total
+
+
+def record_generator(parquet_files):
+    for file_path in parquet_files:
+        df = pd.read_parquet(file_path)
+        for record in df.itertuples():
+            yield record
+
+
+def gpt_to_omop_converter_batch(
     const: int,
-    pat_seq_split: Union[np.ndarray, pd.Series],
-    pat_concept_values: Union[np.ndarray, pd.Series],
+    patient_sequence_parquet_files: List[str],
     domain_map: Dict[int, str],
     output_folder: str,
     buffer_size: int,
-    original_person_id: bool,
-    lab_stats_mapping: Dict[int, Dict[str, float]],
+    use_original_person_id: bool,
 ):
     omop_export_dict = {}
     error_dict = {}
@@ -190,7 +202,6 @@ def gpt_to_omop_converter_serial(
     for tb in TABLE_LIST:
         create_folder_if_not_exists(output_folder, tb)
         id_mappings_dict[tb] = {}
-    pat_seq_len = pat_seq_split.shape[0]
 
     visit_occurrence_id: int = const + 1
     condition_occurrence_id: int = const + 1
@@ -198,42 +209,67 @@ def gpt_to_omop_converter_serial(
     drug_exposure_id: int = const + 1
     measurement_id: int = const + 1
 
+    # Default the person_id
     person_id: int = const + 1
 
-    for index, (row, full_concept_values) in tqdm(
-        enumerate(zip(pat_seq_split, pat_concept_values)), total=pat_seq_len
-    ):
+    patient_record_generator = record_generator(patient_sequence_parquet_files)
+    total_record = get_num_records(patient_sequence_parquet_files)
+
+    for index, record in tqdm(enumerate(patient_record_generator), total=total_record):
         bad_sequence = False
-        # ignore start token
-        if original_person_id:
-            person_id = row[0]
-            if "start" in row[1].lower():
-                row = row[2:]
-            else:
-                row = row[1:]
-        else:
-            if "start" in row[0].lower():
-                row = row[1:]
-            else:
-                row = row[0:]
-        tokens_generated = row[START_TOKEN_SIZE:]
-        concept_values = (
-            None
-            if np.any(pd.isnull(full_concept_values))
-            else full_concept_values[START_TOKEN_SIZE:]
-        )
+        # If original_person_id is set to true, we retrieve it from the record.
+        # If person_id doest not exist in the record, we use the default_person_id
+        if use_original_person_id:
+            person_id = getattr(record, "person_id", person_id)
 
+        # Retrieve the
+        concept_ids = getattr(record, "concept_ids")
+        is_numeric_types = getattr(record, "is_numeric_types", None)
+        number_as_values = getattr(record, "number_as_values", None)
+        concept_as_values = getattr(record, "concept_as_values", None)
+        units = getattr(record, "units", None)
+
+        # Skip the start token if it is the first token
+        if "start" in concept_ids[0].lower():
+            concept_ids = concept_ids[1:]
+            if is_numeric_types is not None:
+                is_numeric_types = is_numeric_types[1:]
+            if number_as_values is not None:
+                number_as_values = number_as_values[1:]
+            if concept_as_values is not None:
+                concept_as_values = concept_as_values[1:]
+            if units is not None:
+                units = units[1:]
+
+        clinical_events = concept_ids[START_TOKEN_SIZE:]
         # Skip the sequences whose sequence length is 0
-        if len(tokens_generated) == 0:
+        if len(clinical_events) == 0:
+            continue
+        # Skip the patients whose last token is not a valid end token
+        if clinical_events[-1] not in STOP_TOKENS:
             continue
 
-        # Skip the patients whose last token is not a valid end token
-        if tokens_generated[-1] not in STOP_TOKENS:
-            continue
+        is_numeric_types = (
+            is_numeric_types[START_TOKEN_SIZE:]
+            if is_numeric_types is not None
+            else None
+        )
+        number_as_values = (
+            number_as_values[START_TOKEN_SIZE:]
+            if number_as_values is not None
+            else None
+        )
+        concept_as_values = (
+            concept_as_values[START_TOKEN_SIZE:]
+            if concept_as_values is not None
+            else None
+        )
+        units = units[START_TOKEN_SIZE:] if units is not None else None
 
         # TODO:Need to decode if the input is tokenized
-        start_tokens = row[0:START_TOKEN_SIZE]
-        [start_year, start_age, start_gender, start_race] = [_ for _ in start_tokens]
+        [start_year, start_age, start_gender, start_race] = concept_ids[
+            0:START_TOKEN_SIZE
+        ]
         if "year" not in start_year.lower():
             continue
 
@@ -243,7 +279,7 @@ def gpt_to_omop_converter_serial(
             birth_year = int(start_year) - int(start_age)
         except Exception as e:
             print(
-                f"Failed to convert {start_tokens} due to {e}, skipping to the next record"
+                f"Failed to convert {concept_ids[0:START_TOKEN_SIZE]} due to {e}, skipping to the next record"
             )
             continue
 
@@ -254,31 +290,30 @@ def gpt_to_omop_converter_serial(
         p = Person(person_id, start_gender, birth_year, start_race)
         append_to_dict(omop_export_dict, p, person_id)
         id_mappings_dict["person"][person_id] = person_id
-        pt_seq_dict[person_id] = " ".join(row)
+        pt_seq_dict[person_id] = " ".join(concept_ids)
         discharged_to_concept_id = 0
-        data_cursor = date(int(start_year), 1, 1)
-        att_date_delta = 0
+        date_cursor = datetime.datetime(year=int(start_year), month=1, day=1)
         vo = None
         inpatient_visit_indicator = False
 
-        for idx, x in enumerate(tokens_generated, 0):
+        for event_idx, event in enumerate(clinical_events, 0):
             # For bad sequences, we don't proceed further and break from the for loop
             if bad_sequence:
                 break
-            if is_visit_start(x):
-                if idx == len(tokens_generated) - 1:
+            if is_visit_start(event):
+                if event_idx == len(clinical_events) - 1:
                     break
-                elif tokens_generated[idx + 1] == "[DEATH]":
+                elif clinical_events[event_idx + 1] == "[DEATH]":
                     # If the [DEATH] token is not placed at the end of the sequence, this is a bad sequence
-                    if idx + 2 != len(tokens_generated) - 1:
+                    if event_idx + 2 != len(clinical_events) - 1:
                         bad_sequence = True
                         break
-                    death = Death(p, data_cursor)
+                    death = Death(p, date_cursor.date())
                     append_to_dict(omop_export_dict, death, person_id)
                     id_mappings_dict["death"][person_id] = person_id
                 else:
                     try:
-                        visit_concept_id = int(tokens_generated[idx + 1])
+                        visit_concept_id = int(clinical_events[event_idx + 1])
                         inpatient_visit_indicator = visit_concept_id in [
                             9201,
                             262,
@@ -298,51 +333,72 @@ def gpt_to_omop_converter_serial(
 
                     except (IndexError, ValueError):
                         error_dict[person_id] = {}
-                        error_dict[person_id]["row"] = ",".join(list(row))
+                        error_dict[person_id]["concept_ids"] = " ".join(concept_ids)
                         error_dict[person_id]["error"] = "Wrong visit concept id"
                         bad_sequence = True
                         continue
+
                     vo = VisitOccurrence(
-                        visit_occurrence_id, visit_concept_id, data_cursor, p
+                        visit_occurrence_id, visit_concept_id, date_cursor, p
                     )
                     append_to_dict(omop_export_dict, vo, visit_occurrence_id)
                     id_mappings_dict["visit_occurrence"][
                         visit_occurrence_id
                     ] = person_id
                     visit_occurrence_id += 1
-            elif x in ATT_TIME_TOKENS:
-                if x[0] == "D":
-                    att_date_delta = int(x[1:])
-                elif x[0] == "W":
-                    att_date_delta = int(x[1:]) * 7
-                elif x[0] == "M":
-                    att_date_delta = int(x[1:]) * 30
-                elif x == "LT":
+            elif event in ATT_TIME_TOKENS:
+                if event[0] == "D":
+                    att_date_delta = int(event[1:])
+                elif event[0] == "W":
+                    att_date_delta = int(event[1:]) * 7
+                elif event[0] == "M":
+                    att_date_delta = int(event[1:]) * 30
+                elif event == "LT":
                     att_date_delta = 365 * 3
-                data_cursor = data_cursor + timedelta(days=att_date_delta)
-            elif inpatient_visit_indicator and is_inpatient_att_token(x):
-                # VS\-D\d+\-VE\
-                inpatient_time_span_in_days = extract_time_interval_in_days(x)
-                data_cursor = data_cursor + timedelta(days=inpatient_time_span_in_days)
-            elif is_visit_end(x):
+                else:
+                    att_date_delta = 0
+                # Between visits, the date delta is simply calculated as the date difference
+                date_cursor = date_cursor.replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
+                date_cursor = date_cursor + timedelta(days=att_date_delta)
+            elif inpatient_visit_indicator and is_inpatient_att_token(event):
+                inpatient_time_span_in_days = extract_time_interval_in_days(event)
+                # Reset the data cursor to the start of the day before adding the num of days parsed out from the token
+                date_cursor = date_cursor.replace(hour=0, minute=0, second=0)
+                date_cursor = date_cursor + timedelta(days=inpatient_time_span_in_days)
+            elif inpatient_visit_indicator and event.startswith("i-H"):
+                # Handle hour tokens differently than the day tokens
+                # The way we construct the inpatient hour tokens is that the sum of the consecutive
+                # hour tokens cannot exceed the current day, so the data_cursor is bounded by a
+                # theoretical upper limit
+                upper_bound = date_cursor.replace(
+                    hour=0, minute=0, second=0
+                ) + timedelta(hours=23, minutes=59, seconds=59)
+                hour_delta = int(event[3:])
+                date_cursor = date_cursor + timedelta(hours=hour_delta)
+                if date_cursor > upper_bound:
+                    date_cursor = upper_bound
+            elif is_visit_end(event):
                 if vo is None:
                     bad_sequence = True
                     break
                 # If it's a VE token, nothing needs to be updated because it just means the visit ended
                 if inpatient_visit_indicator:
                     vo.set_discharged_to_concept_id(discharged_to_concept_id)
-                    vo.set_visit_end_date(data_cursor)
-
+                    vo.set_visit_end_date(date_cursor)
                     # if the discharged_to_concept_id patient had died, the death record is created
                     if discharged_to_concept_id == 4216643:
-                        death = Death(p, data_cursor, death_type_concept_id=32823)
+                        death = Death(
+                            p, date_cursor.date(), death_type_concept_id=32823
+                        )
                         append_to_dict(omop_export_dict, death, person_id)
                         id_mappings_dict["death"][person_id] = person_id
                         # If death record is generated, we need to stop the sequence conversion
                         break
                 else:
                     pass
-            elif x in [
+            elif event in [
                 "START",
                 start_year,
                 start_age,
@@ -354,13 +410,13 @@ def gpt_to_omop_converter_serial(
                 pass
             else:
                 try:
-                    concept_id = int(x)
+                    concept_id = int(event)
                     if (
                         concept_id not in domain_map
                         and concept_id not in OOV_CONCEPT_MAP
                     ):
                         error_dict[person_id] = {}
-                        error_dict[person_id]["row"] = " ".join(row)
+                        error_dict[person_id]["concept_ids"] = " ".join(concept_ids)
                         error_dict[person_id][
                             "error"
                         ] = f"No concept id found: {concept_id}"
@@ -381,10 +437,9 @@ def gpt_to_omop_converter_serial(
                             #     bad_sequence = True
                             #     continue
                             # we also enforce the rule where the sequence has to end on a VE token
-                            if (
-                                idx + 1 < len(tokens_generated)
-                                and tokens_generated[idx + 1] != "VE"
-                            ):
+                            if event_idx + 1 < len(
+                                clinical_events
+                            ) and not is_visit_end(clinical_events[event_idx + 1]):
                                 bad_sequence = True
                                 continue
 
@@ -399,7 +454,7 @@ def gpt_to_omop_converter_serial(
                             discharged_to_concept_id = concept_id
                         elif domain == "Condition":
                             co = ConditionOccurrence(
-                                condition_occurrence_id, x, vo, data_cursor
+                                condition_occurrence_id, concept_id, vo, date_cursor
                             )
                             append_to_dict(
                                 omop_export_dict, co, condition_occurrence_id
@@ -410,7 +465,7 @@ def gpt_to_omop_converter_serial(
                             condition_occurrence_id += 1
                         elif domain == "Procedure":
                             po = ProcedureOccurrence(
-                                procedure_occurrence_id, x, vo, data_cursor
+                                procedure_occurrence_id, concept_id, vo, date_cursor
                             )
                             append_to_dict(
                                 omop_export_dict, po, procedure_occurrence_id
@@ -420,25 +475,40 @@ def gpt_to_omop_converter_serial(
                             ] = person_id
                             procedure_occurrence_id += 1
                         elif domain == "Drug":
-                            de = DrugExposure(drug_exposure_id, x, vo, data_cursor)
+                            de = DrugExposure(
+                                drug_exposure_id, concept_id, vo, date_cursor
+                            )
                             append_to_dict(omop_export_dict, de, drug_exposure_id)
                             id_mappings_dict["drug_exposure"][
                                 drug_exposure_id
                             ] = person_id
                             drug_exposure_id += 1
                         elif domain == "Measurement":
-                            concept_value = (
-                                concept_values[idx]
-                                if concept_values is not None
-                                else 0.0
+                            number_as_value = (
+                                number_as_values[event_idx]
+                                if number_as_values is not None
+                                else None
                             )
-                            if concept_id in lab_stats_mapping:
-                                concept_value = (
-                                    concept_value * lab_stats_mapping[concept_id]["std"]
-                                    + lab_stats_mapping[concept_id]["mean"]
-                                )
+                            concept_as_value = (
+                                concept_as_values[event_idx]
+                                if concept_as_values is not None
+                                else None
+                            )
+                            is_numeric_type = (
+                                is_numeric_types[event_idx]
+                                if is_numeric_types is not None
+                                else None
+                            )
+                            unit = units[event_idx] if units is not None else None
                             m = Measurement(
-                                measurement_id, x, concept_value, vo, data_cursor
+                                measurement_id,
+                                measurement_concept_id=concept_id,
+                                is_numeric_type=is_numeric_type,
+                                value_as_number=number_as_value,
+                                value_as_concept_id=concept_as_value,
+                                visit_occurrence=vo,
+                                measurement_datetime=date_cursor,
+                                unit_source_value=unit,
                             )
                             append_to_dict(omop_export_dict, m, measurement_id)
                             id_mappings_dict["measurement"][measurement_id] = person_id
@@ -446,13 +516,14 @@ def gpt_to_omop_converter_serial(
 
                 except ValueError:
                     error_dict[person_id] = {}
-                    error_dict[person_id]["row"] = " ".join(row)
-                    error_dict[person_id]["error"] = f"Wrong concept id: {x}"
+                    error_dict[person_id]["concept_ids"] = " ".join(concept_ids)
+                    error_dict[person_id]["error"] = f"Wrong concept id: {event}"
                     bad_sequence = True
                     continue
         if bad_sequence:
             delete_bad_sequence(omop_export_dict, id_mappings_dict, person_id)
-        if not original_person_id:
+
+        if not use_original_person_id:
             person_id += 1
 
         if index != 0 and index % buffer_size == 0:
@@ -480,76 +551,44 @@ def gpt_to_omop_converter_serial(
         f.write(str(export_error))
 
 
-def gpt_to_omop_converter_parallel(
-    output_folder: str,
-    concept_pd: pd.DataFrame,
-    patient_sequences_concept_ids: pd.DataFrame,
-    buffer_size: int,
-    num_of_cores: int,
-    original_person_id: bool,
-    all_lab_stats: List[Dict[int, Any]] = None,
-):
-    patient_sequences = patient_sequences_concept_ids["concept_ids"]
-    concept_values = patient_sequences_concept_ids["concept_values"]
+def main(args):
+    all_parquet_files = glob.glob(
+        os.path.join(args.patient_sequence_path, "*parquet"), recursive=True
+    )
+    if len(all_parquet_files) == 0:
+        raise RuntimeError(f"No parquet files found in {args.patient_sequence_path}")
+
+    print(
+        f"There are total {len(all_parquet_files)} parquet files detected in {args.patient_sequence_path}."
+    )
+    if not os.path.exists(args.output_folder):
+        Path(args.output_folder).mkdir(parents=True, exist_ok=True)
+
+    batched_parquet_files = np.array_split(all_parquet_files, args.cpu_cores)
+    concept_pd = pd.read_parquet(args.concept_path)
     domain_map = generate_omop_concept_domain(concept_pd)
-    lab_stats_mapping = generate_lab_stats_mapping(all_lab_stats)
+
     pool_tuples = []
     # TODO: Need to make this dynamic
     const = 10000000
-    patient_sequences_list = np.array_split(patient_sequences, num_of_cores)
-    concept_values_list = np.array_split(concept_values, num_of_cores)
-    for i in range(1, num_of_cores + 1):
+    for i in range(1, args.cpu_cores + 1):
         pool_tuples.append(
             (
                 const * i,
-                patient_sequences_list[i - 1],
-                concept_values_list[i - 1],
+                batched_parquet_files[i - 1],
                 domain_map,
-                output_folder,
-                buffer_size,
-                original_person_id,
-                lab_stats_mapping,
+                args.output_folder,
+                args.buffer_size,
+                args.use_original_person_id,
             )
         )
 
-    with Pool(processes=num_of_cores) as p:
-        p.starmap(gpt_to_omop_converter_serial, pool_tuples)
+    with Pool(processes=args.cpu_cores) as p:
+        p.starmap(gpt_to_omop_converter_batch, pool_tuples)
         p.close()
         p.join()
 
     return print("Done")
-
-
-def main(args):
-    concept_pd = pd.read_parquet(args.concept_path)
-    all_lab_stats = (
-        load_json_file(args.lab_stats_path) if args.lab_stats_path is not None else None
-    )
-
-    if args.original_person_id:
-        patient_sequences_concept_ids = pd.read_parquet(
-            args.patient_sequence_path,
-            columns=["person_id", "concept_ids", "concept_values"],
-        )
-        patient_sequences_concept_ids["concept_ids"] = (
-            patient_sequences_concept_ids.apply(
-                lambda row: np.append(row.person_id, row.concept_ids), axis=1
-            )
-        )
-        patient_sequences_concept_ids.drop(columns=["person_id"], inplace=True)
-    else:
-        patient_sequences_concept_ids = pd.read_parquet(
-            args.patient_sequence_path, columns=["concept_ids", "concept_values"]
-        )
-    gpt_to_omop_converter_parallel(
-        args.output_folder,
-        concept_pd,
-        patient_sequences_concept_ids,
-        args.buffer_size,
-        args.cpu_cores,
-        args.original_person_id,
-        all_lab_stats,
-    )
 
 
 if __name__ == "__main__":
@@ -571,15 +610,13 @@ if __name__ == "__main__":
         required=True,
     )
     parser.add_argument(
-        "--lab_stats_path", dest="lab_stats_path", action="store", required=False
-    )
-    parser.add_argument(
         "--buffer_size",
         dest="buffer_size",
         action="store",
         type=int,
         help="The size of the batch",
-        required=True,
+        required=False,
+        default=1024,
     )
     parser.add_argument(
         "--patient_sequence_path",
@@ -595,10 +632,11 @@ if __name__ == "__main__":
         action="store",
         help="The number of cpu cores to use for multiprocessing",
         required=False,
+        default=1,
     )
     parser.add_argument(
-        "--original_person_id",
-        dest="original_person_id",
+        "--use_original_person_id",
+        dest="use_original_person_id",
         action="store_true",
         help="Whether or not to use the original person id",
     )
