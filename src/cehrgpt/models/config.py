@@ -88,6 +88,14 @@ class CEHRGPTConfig(PretrainedConfig):
         "num_hidden_layers": "n_layer",
     }
 
+    @property
+    def token_to_time_token_mapping(self) -> Dict[int, List[int]]:
+        # The saved _token_to_time_token_mapping converts the key to string, so we need to convert it back to int
+        return {
+            int(token): list(map(int, sub_tokens))
+            for token, sub_tokens in self._token_to_time_token_mapping.items()
+        }
+
     def __init__(
         self,
         vocab_size=50257,
@@ -117,15 +125,28 @@ class CEHRGPTConfig(PretrainedConfig):
         reorder_and_upcast_attn=False,
         exclude_position_ids=False,
         include_values=False,
+        value_vocab_size=None,
         include_ttv_prediction=False,
         use_sub_time_tokenization=True,
+        token_to_time_token_mapping: Dict[int, List] = None,
+        use_pretrained_embeddings=False,
+        n_pretrained_embeddings_layers=2,
+        pretrained_embedding_dim=768,
+        pretrained_token_ids: List[int] = None,
         time_token_loss_weight=1.0,
         time_to_visit_loss_weight=1.0,
-        token_to_time_token_mapping: Dict[int, List] = None,
+        causal_sfm=False,
+        demographics_size=4,
+        lab_token_penalty=False,
+        lab_token_loss_weight=0.9,
+        entropy_penalty=False,
+        entropy_penalty_alpha=0.01,
         **kwargs,
     ):
         if token_to_time_token_mapping is None:
             token_to_time_token_mapping = {}
+        if pretrained_token_ids is None:
+            pretrained_token_ids = list()
         self.vocab_size = vocab_size
         self.time_token_vocab_size = time_token_vocab_size
         self.n_positions = n_positions
@@ -155,18 +176,30 @@ class CEHRGPTConfig(PretrainedConfig):
 
         self.exclude_position_ids = exclude_position_ids
         self.include_values = include_values
+        self.value_vocab_size = value_vocab_size
+
         self.include_ttv_prediction = include_ttv_prediction
         self.use_sub_time_tokenization = use_sub_time_tokenization
         self._token_to_time_token_mapping = token_to_time_token_mapping
         self.time_token_loss_weight = time_token_loss_weight
         self.time_to_visit_loss_weight = time_to_visit_loss_weight
+        self.causal_sfm = causal_sfm
+        self.demographics_size = demographics_size
+        self.use_pretrained_embeddings = use_pretrained_embeddings
+        self.pretrained_embedding_dim = pretrained_embedding_dim
+        self.pretrained_token_ids = pretrained_token_ids
+        self.n_pretrained_embeddings_layers = n_pretrained_embeddings_layers
+        # self.tie_word_embeddings = not use_pretrained_embeddings
+
+        self.lab_token_penalty = lab_token_penalty
+        self.lab_token_loss_weight = lab_token_loss_weight
+        self.entropy_penalty = entropy_penalty
+        self.entropy_penalty_alpha = entropy_penalty_alpha
+
+        kwargs["tie_word_embeddings"] = not use_pretrained_embeddings
 
         super().__init__(bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
 
     @property
-    def token_to_time_token_mapping(self) -> Dict[int, List[int]]:
-        # The saved _token_to_time_token_mapping converts the key to string, so we need to convert it back to int
-        return {
-            int(token): list(map(int, sub_tokens))
-            for token, sub_tokens in self._token_to_time_token_mapping.items()
-        }
+    def lab_token_exists(self) -> bool:
+        return self.lab_token_ids is not None and len(self.lab_token_ids) > 0

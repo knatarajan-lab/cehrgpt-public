@@ -1,5 +1,7 @@
 import json
 import os
+import random
+import shutil
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -46,6 +48,7 @@ from cehrgpt.models.hf_cehrgpt import (
     CehrGptForClassification,
     CEHRGPTPreTrainedModel,
 )
+from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
@@ -126,7 +129,9 @@ def load_pretrained_tokenizer(
 
 
 def load_finetuned_model(
-    model_args: ModelArguments, model_name_or_path: str
+    model_args: ModelArguments,
+    training_args: TrainingArguments,
+    model_name_or_path: str,
 ) -> CEHRGPTPreTrainedModel:
     if model_args.finetune_model_type == FineTuneModelType.POOLING.value:
         finetune_model_cls = CehrGptForClassification
@@ -138,10 +143,13 @@ def load_finetuned_model(
     attn_implementation = (
         "flash_attention_2" if is_flash_attn_2_available() else "eager"
     )
+    torch_dtype = torch.bfloat16 if training_args.bf16 else torch.float32
     # Try to create a new model based on the base model
     try:
         return finetune_model_cls.from_pretrained(
-            model_name_or_path, attn_implementation=attn_implementation
+            model_name_or_path,
+            attn_implementation=attn_implementation,
+            torch_dtype=torch_dtype,
         )
     except ValueError:
         raise ValueError(f"Can not load the finetuned model from {model_name_or_path}")
@@ -286,7 +294,15 @@ def model_init(
     training_args: TrainingArguments,
     tokenizer: CehrGptTokenizer,
 ):
-    model = load_finetuned_model(model_args, model_args.model_name_or_path)
+    model = load_finetuned_model(
+        model_args, training_args, model_args.model_name_or_path
+    )
+    if model.config.max_position_embeddings < model_args.max_position_embeddings:
+        LOG.info(
+            f"Increase model.config.max_position_embeddings to {model_args.max_position_embeddings}"
+        )
+        model.config.max_position_embeddings = model_args.max_position_embeddings
+        model.resize_position_embeddings(model_args.max_position_embeddings)
     # Enable include_values when include_values is set to be False during pre-training
     if model_args.include_values and not model.cehrgpt.include_values:
         model.cehrgpt.include_values = True
@@ -296,6 +312,24 @@ def model_init(
     # Expand tokenizer to adapt to the finetuning dataset
     if model.config.vocab_size < tokenizer.vocab_size:
         model.resize_token_embeddings(tokenizer.vocab_size)
+        # Update the pretrained embedding weights if they are available
+        if model.config.use_pretrained_embeddings:
+            model.cehrgpt.update_pretrained_embeddings(
+                tokenizer.pretrained_token_ids, tokenizer.pretrained_embeddings
+            )
+        elif tokenizer.pretrained_token_ids:
+            model.config.pretrained_embedding_dim = (
+                tokenizer.pretrained_embeddings.shape[1]
+            )
+            model.config.use_pretrained_embeddings = True
+            model.cehrgpt.initialize_pretrained_embeddings()
+            model.cehrgpt.update_pretrained_embeddings(
+                tokenizer.pretrained_token_ids, tokenizer.pretrained_embeddings
+            )
+    # Expand value tokenizer to adapt to the fine-tuning dataset
+    if model.config.include_values:
+        if model.config.value_vocab_size < tokenizer.value_vocab_size:
+            model.resize_value_embeddings(tokenizer.value_vocab_size)
     # If lora is enabled, we add LORA adapters to the model
     if model_args.use_lora:
         # When LORA is used, the trainer could not automatically find this label,
@@ -325,11 +359,12 @@ def model_init(
 
 def main():
     cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
-
     tokenizer = load_pretrained_tokenizer(model_args)
     prepared_ds_path = generate_prepared_ds_path(
         data_args, model_args, data_folder=data_args.cohort_folder
     )
+
+    processed_dataset = None
     if any(prepared_ds_path.glob("*")):
         LOG.info(f"Loading prepared dataset from disk at {prepared_ds_path}...")
         processed_dataset = load_from_disk(str(prepared_ds_path))
@@ -338,13 +373,17 @@ def main():
             try:
                 tokenizer = CehrGptTokenizer.from_pretrained(training_args.output_dir)
             except Exception:
-                raise RuntimeError(
+                LOG.warning(
                     f"CehrGptTokenizer must exist in {training_args.output_dir} "
-                    f"when the dataset has been processed and expand_tokenizer is set to True"
+                    f"when the dataset has been processed and expand_tokenizer is set to True. "
+                    f"Please delete the processed dataset at {prepared_ds_path}."
                 )
-    else:
+                processed_dataset = None
+                shutil.rmtree(prepared_ds_path)
+
+    if processed_dataset is None:
         # If the data is in the MEDS format, we need to convert it to the CEHR-BERT format
-        if data_args.is_data_in_med:
+        if data_args.is_data_in_meds:
             meds_extension_path = get_meds_extension_path(
                 data_folder=data_args.cohort_folder,
                 dataset_prepared_path=data_args.dataset_prepared_path,
@@ -390,12 +429,21 @@ def main():
             try:
                 tokenizer = CehrGptTokenizer.from_pretrained(new_tokenizer_path)
             except Exception:
+                # Try to use the defined pretrained embeddings if exists,
+                # Otherwise we default to the pretrained model embedded in the pretrained model
+                pretrained_concept_embedding_model = PretrainedEmbeddings(
+                    cehrgpt_args.pretrained_embedding_path
+                )
+                if not pretrained_concept_embedding_model.exists:
+                    pretrained_concept_embedding_model = (
+                        tokenizer.pretrained_concept_embedding_model
+                    )
                 tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
                     cehrgpt_tokenizer=tokenizer,
                     dataset=final_splits["train"],
-                    feature_names=["concept_ids"],
                     data_args=data_args,
                     concept_name_mapping={},
+                    pretrained_concept_embedding_model=pretrained_concept_embedding_model,
                 )
                 tokenizer.save_pretrained(os.path.expanduser(training_args.output_dir))
 
@@ -410,14 +458,37 @@ def main():
 
     processed_dataset.set_format("pt")
 
+    if cehrgpt_args.few_shot_predict:
+        # At least we need two examples to have a validation set for early stopping
+        num_shots = max(cehrgpt_args.n_shots, 2)
+        random_train_indices = random.sample(
+            range(len(processed_dataset["train"])), k=num_shots
+        )
+        test_size = max(int(num_shots * data_args.validation_split_percentage), 1)
+        few_shot_train_val_set = processed_dataset["train"].select(random_train_indices)
+        train_val = few_shot_train_val_set.train_test_split(
+            test_size=test_size, seed=training_args.seed
+        )
+        few_shot_train_set, few_shot_val_set = train_val["train"], train_val["test"]
+        processed_dataset["train"] = few_shot_train_set
+        processed_dataset["validation"] = few_shot_val_set
+
     config = CEHRGPTConfig.from_pretrained(model_args.model_name_or_path)
+    if config.max_position_embeddings < model_args.max_position_embeddings:
+        config.max_position_embeddings = model_args.max_position_embeddings
     # We suppress the additional learning objectives in fine-tuning
     data_collator = CehrGptDataCollator(
         tokenizer=tokenizer,
-        max_length=config.max_position_embeddings,
+        max_length=(
+            config.max_position_embeddings - 1
+            if config.causal_sfm
+            else config.max_position_embeddings
+        ),
+        include_values=model_args.include_values,
         pretraining=False,
         include_ttv_prediction=False,
         use_sub_time_tokenization=False,
+        include_demographics=cehrgpt_args.include_demographics,
     )
 
     if training_args.do_train:
@@ -575,7 +646,7 @@ def do_predict(
 
     # Load model and LoRA adapters if applicable
     model = (
-        load_finetuned_model(model_args, training_args.output_dir)
+        load_finetuned_model(model_args, training_args, training_args.output_dir)
         if not model_args.use_lora
         else load_lora_model(model_args, training_args, cehrgpt_args)
     )
@@ -595,7 +666,7 @@ def do_predict(
             index_dates = (
                 map(
                     datetime.fromtimestamp,
-                    batch.pop("index_date").numpy().squeeze().tolist(),
+                    batch.pop("index_date").numpy().squeeze(axis=-1).tolist(),
                 )
                 if "index_date" in batch
                 else None
@@ -606,8 +677,10 @@ def do_predict(
             test_losses.append(output.loss.item())
 
             # Collect logits and labels for prediction
-            logits = output.logits.cpu().numpy().squeeze()
-            labels = batch["classifier_label"].cpu().numpy().squeeze().astype(bool)
+            logits = output.logits.float().cpu().numpy().squeeze()
+            labels = (
+                batch["classifier_label"].float().cpu().numpy().squeeze().astype(bool)
+            )
             probabilities = sigmoid(logits)
             # Save predictions to parquet file
             test_prediction_pd = pd.DataFrame(
@@ -646,7 +719,9 @@ def load_lora_model(
     cehrgpt_args: CehrGPTArguments,
 ) -> PeftModel:
     LOG.info("Loading base model from %s", model_args.model_name_or_path)
-    model = load_finetuned_model(model_args, model_args.model_name_or_path)
+    model = load_finetuned_model(
+        model_args, training_args, model_args.model_name_or_path
+    )
     # Enable include_values when include_values is set to be False during pre-training
     if model_args.include_values and not model.cehrgpt.include_values:
         model.cehrgpt.include_values = True
@@ -658,6 +733,11 @@ def load_lora_model(
         # Expand tokenizer to adapt to the finetuning dataset
         if model.config.vocab_size < tokenizer.vocab_size:
             model.resize_token_embeddings(tokenizer.vocab_size)
+        if (
+            model.config.include_values
+            and model.config.value_vocab_size < tokenizer.value_vocab_size
+        ):
+            model.resize_value_embeddings(tokenizer.value_vocab_size)
     LOG.info("Loading LoRA adapter from %s", training_args.output_dir)
     return PeftModel.from_pretrained(model, model_id=training_args.output_dir)
 

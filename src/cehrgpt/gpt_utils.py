@@ -61,23 +61,37 @@ class RandomSampleCache:
         return self._cache.pop()
 
 
-def collect_demographic_prompts_at_visits(
-    demographic_prompt: List[str], patient_history: List[str]
-):
+def collect_demographic_prompts_at_visits(patient_history: List[str]):
     demographic_prompts_at_visits = []
-    start_year, start_age, start_gender, start_race = demographic_prompt
-    start_year = int(start_year.split(":")[1])
-    start_age = int(start_age.split(":")[1])
+    start_year, start_age, start_gender, start_race = patient_history[
+        :DEMOGRAPHIC_PROMPT_SIZE
+    ]
+    try:
+        start_year = int(start_year.split(":")[1])
+        start_age = int(start_age.split(":")[1])
+        valid_prompt = True
+    except IndexError | ValueError:
+        start_year = 1900
+        start_age = 0
+        valid_prompt = False
     data_cursor = date(int(start_year), 1, 1)
     birth_date = date(start_year - start_age, 1, 1)
     for i, current_token in enumerate(patient_history):
         if is_visit_start(current_token):
+            reconstructed_year = (
+                f"year:{data_cursor.year}" if valid_prompt else "year:unknown"
+            )
+            reconstructed_age = (
+                f"age:{data_cursor.year - birth_date.year}"
+                if valid_prompt
+                else "age:unknown"
+            )
             demographic_prompts_at_visits.append(
                 (
                     i,
                     (
-                        data_cursor.year,
-                        data_cursor.year - birth_date.year,
+                        reconstructed_year,
+                        reconstructed_age,
                         start_gender,
                         start_race,
                     ),
@@ -155,19 +169,19 @@ def get_cehrgpt_output_folder(args, cehrgpt_tokenizer) -> str:
         folder_name = f"top_k{args.top_k}"
         args.top_p = 1.0
     elif args.sampling_strategy == SamplingStrategy.TopPStrategy.value:
-        folder_name = f"top_p{int(args.top_p * 1000)}"
+        folder_name = f"top_p{int(args.top_p * 10000)}"
         args.top_k = cehrgpt_tokenizer.vocab_size
     elif args.sampling_strategy == SamplingStrategy.TopMixStrategy.value:
-        folder_name = f"top_mix_p{int(args.top_p * 1000)}_k{args.top_k}"
+        folder_name = f"top_mix_p{int(args.top_p * 10000)}_k{args.top_k}"
     else:
         raise RuntimeError(
             "sampling_strategy has to be one of the following three options [TopKStrategy, TopPStrategy, TopMixStrategy]"
         )
     if args.temperature != 1.0:
-        folder_name = f"{folder_name}_temp_{int(args.temperature * 1000)}"
+        folder_name = f"{folder_name}_temp_{int(args.temperature * 10000)}"
     if args.repetition_penalty != 1.0:
         folder_name = (
-            f"{folder_name}_repetition_penalty_{int(args.repetition_penalty * 1000)}"
+            f"{folder_name}_repetition_penalty_{int(args.repetition_penalty * 10000)}"
         )
     if args.num_beams > 1:
         folder_name = f"{folder_name}_num_beams_{int(args.num_beams)}"
@@ -242,10 +256,10 @@ def is_artificial_token(token: str) -> bool:
 
 def is_inpatient_att_token(token: str):
     """
-    Check if the token is an inpatient attendance token.
+    Check if the token is an inpatient ATT token.
 
     :param token: Token to check.
-    :return: True if the token is an inpatient attendance token, False otherwise.
+    :return: True if the token is an inpatient ATT token, False otherwise.
     """
     return INPATIENT_ATT_PATTERN.match(token)
 
