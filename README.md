@@ -32,4 +32,3 @@ pip install .
   journal={arXiv preprint arXiv:2402.04400},
   year={2024}
 }
-```
