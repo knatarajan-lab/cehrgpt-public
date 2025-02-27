@@ -34,10 +34,10 @@ learning_rate: 0.00005
 per_device_train_batch_size: 4
 per_device_eval_batch_size: 4
 gradient_accumulation_steps: 1
-num_train_epochs: 2
+num_train_epochs: 1
 # When streaming is set to True, max_steps needs to be provided
-max_steps: 5000
-save_steps: 1000
+max_steps: 1000
+save_steps: 500
 
 warmup_steps: 100
 weight_decay: 0.01
