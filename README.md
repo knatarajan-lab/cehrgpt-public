@@ -25,6 +25,9 @@ pip install .
 ## Pretrain
 Pretrain cehrgpt using the Hugging Face trainer, the parameters can be found in the sample configuration yaml
 ```bash
+mkdir test_results
+# This is NOT required when streaming is set to true
+mkdir test_dataset_prepared
 python -u -m cehrgpt.runners.hf_cehrgpt_pretrain_runner sample_configs/cehrgpt_pretrain_sample_config.yaml
 ```
 

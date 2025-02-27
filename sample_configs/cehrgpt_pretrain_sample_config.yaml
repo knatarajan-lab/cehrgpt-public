@@ -4,7 +4,7 @@ tokenizer_name_or_path: "test_results"
 data_folder: "sample_data/pretrain"
 dataset_prepared_path: "test_dataset_prepared"
 validation_split_percentage: 0.05
-validation_split_num: 1000
+validation_split_num: 10
 preprocessing_num_workers: 4
 preprocessing_batch_size: 1000
 streaming: true
@@ -25,7 +25,7 @@ max_position_embeddings: 1024
 
 # torch dataloader configs
 dataloader_num_workers: 4
-dataloader_prefetch_factor: 4
+dataloader_prefetch_factor: 2
 
 output_dir: "test_results"
 save_strategy: "steps"
@@ -47,3 +47,5 @@ save_total_limit: 5
 load_best_model_at_end: false
 metric_for_best_model: "eval_loss"
 greater_is_better: false
+
+report_to: "none"

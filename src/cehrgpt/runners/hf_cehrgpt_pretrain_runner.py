@@ -148,7 +148,7 @@ def main():
         # The iterable dataset doesn't have sharding implemented, so the number of works has to be set to 0
         # Otherwise the trainer will throw an error
         training_args.dataloader_num_workers = 0
-        training_args.dataloader_prefetch_factor = 0
+        training_args.dataloader_prefetch_factor = None
 
     prepared_ds_path = generate_prepared_ds_path(data_args, model_args)
     if os.path.exists(os.path.join(data_args.data_folder, "dataset_dict.json")):
@@ -219,7 +219,9 @@ def main():
         else:
             # Load the dataset from the parquet files
             dataset = load_parquet_as_dataset(
-                data_args.data_folder, split="train", streaming=data_args.streaming
+                os.path.expanduser(data_args.data_folder),
+                split="train",
+                streaming=data_args.streaming,
             )
             # If streaming is enabled, we need to manually split the data into train/val
             if data_args.streaming and data_args.validation_split_num:
